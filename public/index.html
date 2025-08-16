@@ -1,0 +1,42 @@
+
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Google Photos Player</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 1rem; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+    h1 { font-size: 1.25rem; margin: .5rem 0; }
+    #videos { display: grid; gap: .5rem; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); margin-top: 1rem; }
+    .card { border: 1px solid #ddd; border-radius: 12px; padding: .75rem; cursor: pointer; }
+    .card:hover { background: rgba(0,0,0,.03); }
+    video { width: 100%; max-height: 70vh; border-radius: 12px; margin-top: .75rem; background: #000; }
+    .muted { opacity: .7; }
+    .btn { display:inline-block; padding:.5rem .8rem; border-radius:10px; border:1px solid #ddd; text-decoration:none; }
+    .row { display:flex; gap:.5rem; align-items:center; flex-wrap:wrap; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Ваши видео из Google Photos</h1>
+    <div class="row">
+      <a class="btn" href="/logout">Выйти</a>
+      <button class="btn" id="refreshBtn">Обновить список</button>
+    </div>
+  </header>
+
+  <main>
+    <div id="playerWrap" class="muted">Выберите видео слева, чтобы начать воспроизведение.</div>
+    <video id="player" controls playsinline></video>
+    <section>
+      <h2>Список</h2>
+      <div id="videos"></div>
+    </section>
+  </main>
+
+  <script type="module" src="/main.js"></script>
+</body>
+</html>
