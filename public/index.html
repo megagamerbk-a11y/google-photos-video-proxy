@@ -1,42 +1,99 @@
-
 <!doctype html>
 <html lang="ru">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Google Photos Player</title>
   <style>
-    :root { color-scheme: light dark; }
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 1rem; }
-    header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
-    h1 { font-size: 1.25rem; margin: .5rem 0; }
-    #videos { display: grid; gap: .5rem; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); margin-top: 1rem; }
-    .card { border: 1px solid #ddd; border-radius: 12px; padding: .75rem; cursor: pointer; }
-    .card:hover { background: rgba(0,0,0,.03); }
-    video { width: 100%; max-height: 70vh; border-radius: 12px; margin-top: .75rem; background: #000; }
-    .muted { opacity: .7; }
-    .btn { display:inline-block; padding:.5rem .8rem; border-radius:10px; border:1px solid #ddd; text-decoration:none; }
-    .row { display:flex; gap:.5rem; align-items:center; flex-wrap:wrap; }
+    :root {
+      --bg:#fff; --text:#111; --muted:#666; --line:#e6e6e6;
+      --btn:#f6f6f6; --btn-border:#d0d0d0; --btn-hover:#eee;
+      --accent:#0b57d0;
+    }
+    * { box-sizing:border-box; }
+    body {
+      margin:0; padding:0 20px 40px;
+      background:var(--bg); color:var(--text);
+      font:16px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    }
+    header {
+      display:flex; gap:12px; justify-content:flex-end; align-items:center;
+      padding:16px 0; border-bottom:1px solid var(--line); margin-bottom:16px;
+    }
+    h1 { margin:10px 0 8px; font-size:28px; }
+    p.lead { margin:0 0 18px; color:var(--muted); }
+
+    button {
+      padding:8px 14px; border-radius:10px; border:1px solid var(--btn-border);
+      background:var(--btn); cursor:pointer; transition:background .15s ease;
+    }
+    button:hover { background:var(--btn-hover); }
+    button.primary {
+      color:#fff; background:var(--accent); border-color:var(--accent);
+    }
+    button.primary:hover { filter:brightness(0.95); }
+    button:disabled { opacity:.55; cursor:not-allowed; }
+
+    .hidden { display:none !important; }
+
+    .layout {
+      display:grid; grid-template-columns: 320px 1fr; gap:20px;
+    }
+    @media (max-width: 960px) { .layout { grid-template-columns: 1fr; } }
+
+    .list {
+      border:1px solid var(--line); border-radius:12px; overflow:hidden;
+      min-height:200px;
+    }
+    .list > .title {
+      padding:12px 14px; border-bottom:1px solid var(--line); font-weight:600;
+      background:#fafafa;
+    }
+    .items { list-style:none; margin:0; padding:0; max-height:60vh; overflow:auto; }
+    .items li {
+      padding:10px 14px; border-bottom:1px solid var(--line); cursor:pointer;
+    }
+    .items li:hover { background:#fafafa; }
+    .empty { padding:16px; color:var(--muted); }
+
+    .player {
+      border:1px solid var(--line); border-radius:12px; padding:12px;
+    }
+    video { width:100%; max-height:65vh; background:#000; border-radius:8px; }
+
+    .toolbar { display:flex; gap:10px; margin-bottom:10px; }
+    .note { color:var(--muted); font-size:14px; }
   </style>
 </head>
 <body>
   <header>
-    <h1>Ваши видео из Google Photos</h1>
-    <div class="row">
-      <a class="btn" href="/logout">Выйти</a>
-      <button class="btn" id="refreshBtn">Обновить список</button>
-    </div>
+    <button id="loginBtn" class="primary">Войти</button>
+    <button id="logoutBtn" class="hidden">Выйти</button>
+    <button id="refreshBtn" disabled>Обновить список</button>
   </header>
 
-  <main>
-    <div id="playerWrap" class="muted">Выберите видео слева, чтобы начать воспроизведение.</div>
-    <video id="player" controls playsinline></video>
-    <section>
-      <h2>Список</h2>
-      <div id="videos"></div>
-    </section>
-  </main>
+  <h1>Ваши видео из Google Photos</h1>
+  <p class="lead">Выберите видео слева, чтобы начать воспроизведение.</p>
 
-  <script type="module" src="/main.js"></script>
+  <div class="layout">
+    <!-- Список видео -->
+    <section class="list">
+      <div class="title">Список</div>
+      <ul id="list" class="items">
+        <li class="empty">Видео не загружены. Нажмите «Обновить список».</li>
+      </ul>
+    </section>
+
+    <!-- Проигрыватель -->
+    <section class="player">
+      <div class="toolbar">
+        <span id="currentTitle" class="note">Ничего не выбрано</span>
+      </div>
+      <video id="video" controls preload="metadata" playsinline></video>
+    </section>
+  </div>
+
+  <!-- Подключение логики -->
+  <script src="/main.js" defer></script>
 </body>
 </html>
