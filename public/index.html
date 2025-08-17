@@ -1,123 +1,58 @@
 <!doctype html>
 <html lang="ru">
-  <head>
-    <meta charset="utf-8" />
-    <title>Google Photos Player</title>
-    <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <style>
-      :root {
-        --bg: #0f1115;
-        --fg: #e6e6e6;
-        --muted: #9aa0a6;
-        --btn: #1f6feb;
-        --btn-fg: #fff;
-        --card: #161a22;
-        --border: #2b3240;
-      }
-      html, body {
-        margin: 0;
-        background: var(--bg);
-        color: var(--fg);
-        font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-      }
-      header {
-        padding: 16px 20px;
-        font-weight: 700;
-      }
-      .toolbar {
-        display: flex;
-        gap: 12px;
-        padding: 0 20px 16px 20px;
-      }
-      button {
-        background: var(--card);
-        color: var(--fg);
-        border: 1px solid var(--border);
-        border-radius: 10px;
-        padding: 10px 14px;
-        cursor: pointer;
-        transition: 0.2s ease;
-      }
-      button.primary {
-        background: var(--btn);
-        color: var(--btn-fg);
-        border-color: transparent;
-      }
-      button:disabled {
-        opacity: 0.6;
-        cursor: default;
-      }
-      .player {
-        background: #000;
-        border-top: 1px solid var(--border);
-        border-bottom: 1px solid var(--border);
-        padding: 12px 0;
-      }
-      .wrap {
-        max-width: 1200px;
-        margin: 0 auto;
-        padding: 0 20px;
-      }
-      video {
-        width: 100%;
-        max-height: 60vh;
-        background: #000;
-        border-radius: 10px;
-        outline: none;
-      }
-      h2 {
-        margin: 20px;
-      }
-      .grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-        gap: 12px;
-        padding: 0 20px 40px 20px;
-      }
-      .item {
-        border: 1px solid var(--border);
-        border-radius: 12px;
-        background: var(--card);
-        padding: 12px;
-        display: flex;
-        gap: 12px;
-        align-items: center;
-        cursor: pointer;
-      }
-      .item:hover { border-color: #3a455a; }
-      .name {
-        color: var(--fg);
-        font-size: 14px;
-        line-height: 1.3;
-      }
-      .muted { color: var(--muted); font-size: 12px; }
-      .empty {
-        color: var(--muted);
-        padding: 0 20px 40px 20px;
-      }
-    </style>
-  </head>
-  <body>
-    <header class="wrap">Google Photos Player</header>
+<head>
+  <meta charset="utf-8" />
+  <meta
+    name="viewport"
+    content="width=device-width,initial-scale=1,maximum-scale=1"
+  />
+  <title>Google Photos Player</title>
+  <style>
+    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; background:#0b0b0b; color:#eee; }
+    header { display:flex; gap:12px; align-items:center; padding:14px 16px; background:#141414; position:sticky; top:0; }
+    h1 { font-size:18px; font-weight:600; margin:0; flex:1; }
+    button {
+      background:#2b2b2b; border:1px solid #3a3a3a; color:#eaeaea;
+      border-radius:8px; padding:9px 14px; cursor:pointer;
+    }
+    button:hover { background:#343434; }
+    .wrap { padding:16px; }
+    .grid {
+      display:grid; grid-template-columns: 280px 1fr; gap:16px; align-items:start;
+    }
+    .panel {
+      background:#131313; border:1px solid #262626; border-radius:12px; overflow:auto;
+      max-height: calc(100dvh - 160px);
+    }
+    ul { margin:0; padding:0; list-style:none; }
+    li {
+      border-bottom:1px solid #1f1f1f; padding:10px 12px; font-size:14px; cursor:pointer;
+    }
+    li:hover { background:#1a1a1a; }
+    video { width:100%; height:auto; display:block; background:#000; border-radius:12px; }
+    .empty { padding:14px; color:#aaa; font-size:14px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Google Photos Player</h1>
+    <button id="btn-refresh" disabled>Обновить список</button>
+    <button id="btn-auth">Войти</button>
+  </header>
 
-    <div class="toolbar">
-      <button id="loginBtn" class="primary">Войти с Google</button>
-      <button id="logoutBtn">Выйти</button>
-      <button id="refreshBtn">Обновить список</button>
-    </div>
+  <div class="wrap">
+    <div class="grid">
+      <div class="panel">
+        <ul id="list"></ul>
+        <div id="empty-list" class="empty" hidden>Список пуст</div>
+      </div>
 
-    <div class="player">
-      <div class="wrap">
-        <video id="video" controls preload="metadata"></video>
+      <div>
+        <video id="player" controls></video>
       </div>
     </div>
+  </div>
 
-    <h2>Список</h2>
-    <div id="list" class="grid"></div>
-    <div id="empty" class="empty" style="display:none;">
-      Видео не найдены. Нажмите «Обновить список» или убедитесь, что в Google Photos есть видео.
-    </div>
-
-    <script src="main.js" defer></script>
-  </body>
+  <script src="/main.js"></script>
+</body>
 </html>
