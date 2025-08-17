@@ -7,13 +7,12 @@
     "start": "node server.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=18 <21"
   },
   "dependencies": {
-    "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "express-session": "^1.17.3",
-    "googleapis": "^131.0.0",
-    "node-fetch": "^2.6.12"
+    "passport": "^0.7.0",
+    "passport-google-oauth20": "^2.0.0"
   }
 }
