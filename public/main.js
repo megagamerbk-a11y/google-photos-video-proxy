@@ -1,238 +1,101 @@
-/* public/main.js */
+async function getJSON(url) {
+  const r = await fetch(url, { credentials: 'same-origin' });
+  if (!r.ok) throw new Error(`${r.status}`);
+  return r.json();
+}
 
-(() => {
-  const els = {
-    login: document.getElementById('loginBtn'),
-    logout: document.getElementById('logoutBtn'),
-    refresh: document.getElementById('refreshBtn'),
-    list: document.getElementById('list'),
-    video: document.getElementById('video'),
-    title: document.getElementById('currentTitle')
-  };
+const authBtn = document.getElementById('authBtn');
+const refreshBtn = document.getElementById('refresh');
+const hello = document.getElementById('hello');
+const player = document.getElementById('player');
+const list = document.getElementById('list');
+const emptyLabel = document.getElementById('empty');
 
-  const api = {
-    me: '/api/me',
-    login: '/auth/google',
-    logoutCandidates: ['/logout', '/auth/logout', '/api/logout'],
-    videos: '/api/videos',
-    stream: id => `/api/video/${encodeURIComponent(id)}/stream`
-  };
+let AUTH = { authenticated: false, user: null };
 
-  let state = {
-    authed: false,
-    items: [],
-    activeId: null
-  };
-
-  // ---------- helpers ----------
-
-  async function getJSON(url) {
-    const res = await fetch(url, { credentials: 'include' });
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`HTTP ${res.status}: ${text || res.statusText}`);
-    }
-    return res.json();
+async function updateAuthUI() {
+  try {
+    AUTH = await getJSON('/auth/status');
+  } catch {
+    AUTH = { authenticated: false, user: null };
   }
 
-  function setText(el, text) {
-    el.textContent = text;
+  if (AUTH.authenticated) {
+    authBtn.textContent = 'Выйти';
+    hello.textContent = AUTH.user?.email ? `Вошли как ${AUTH.user.email}` : '';
+  } else {
+    authBtn.textContent = 'Войти';
+    hello.textContent = '';
   }
+}
 
-  function toggle(el, show) {
-    el.classList.toggle('hidden', !show);
+authBtn.addEventListener('click', () => {
+  if (AUTH.authenticated) {
+    window.location.href = '/auth/logout';
+  } else {
+    window.location.href = '/auth/google';
   }
+});
 
-  function setBusy(btn, busy) {
-    btn.disabled = !!busy;
-    btn.dataset.busy = busy ? '1' : '';
-  }
-
-  function showError(msg, details) {
-    console.error('[UI ERROR]', msg, details || '');
-    alert(`Ошибка: ${msg}${details ? `\n\nПодробности: ${details}` : ''}`);
-  }
-
-  // ---------- auth / ui ----------
-
-  async function checkAuth() {
-    try {
-      const data = await getJSON(api.me); // ожидаем { authenticated: boolean, email?: string }
-      state.authed = !!(data && (data.authenticated || data.authed || data.ok));
-    } catch (e) {
-      state.authed = false;
-    }
-    updateAuthUI();
-    return state.authed;
-  }
-
-  function updateAuthUI() {
-    toggle(els.login, !state.authed);
-    toggle(els.logout, state.authed);
-    els.refresh.disabled = !state.authed;
-  }
-
-  function login() {
-    // Можно добавить редирект назад: ?redirect=/ (если сервер поддерживает)
-    window.location.href = api.login;
-  }
-
-  async function logout() {
-    setBusy(els.logout, true);
-    try {
-      // Пытаемся корректно разлогиниться POST'ом, если сервер поддерживает
-      let ok = false;
-      for (const path of api.logoutCandidates) {
-        try {
-          const r = await fetch(path, {
-            method: 'POST',
-            credentials: 'include',
-            headers: { 'Content-Type': 'application/json' },
-            body: '{}'
-          });
-          if (r.ok) { ok = true; break; }
-        } catch (_) { /* продолжаем следующую попытку */ }
-      }
-
-      // На некоторых конфигурациях есть только GET /logout — попытаемся и его
-      if (!ok) {
-        try { await fetch('/logout', { credentials: 'include' }); } catch (_) {}
-      }
-    } finally {
-      setBusy(els.logout, false);
-      // Чистим UI вне зависимости от результата — если сессия не очищена,
-      // /api/me это покажет.
-      state.items = [];
-      renderList([]);
-      clearPlayer();
-      await checkAuth();
-    }
-  }
-
-  // ---------- videos ----------
-
-  async function loadVideos() {
-    if (!state.authed) {
-      showError('Вы не авторизованы.');
-      return;
-    }
-    setBusy(els.refresh, true);
-    try {
-      const data = await getJSON(api.videos);
-      // Ожидаем data.items — нормализуем на всякий случай
-      const items = (data && (data.items || data.videos || data.mediaItems)) || [];
-      state.items = items.map(normalizeItem);
-      renderList(state.items);
-      if (state.items.length === 0) {
-        renderEmpty('Видео не найдены. Добавьте видео в Google Photos и нажмите «Обновить список».');
-      }
-    } catch (e) {
-      showError('Не удалось загрузить список видео', e.message);
-    } finally {
-      setBusy(els.refresh, false);
-    }
-  }
-
-  function normalizeItem(x) {
-    // Приводим разные возможные поля к общим
-    return {
-      id: x.id || x.mediaItemId || x.mediaItem?.id || x.videoId || x.filename || String(Math.random()),
-      title: x.title || x.filename || x.filenameBase || x.mediaItem?.filename || 'Видео',
-      mimeType: x.mimeType || x.mediaMetadata?.mimeType || 'video/mp4',
-      streamUrl: x.streamUrl || x.playbackUrl || null,
-      baseUrl: x.baseUrl || x.mediaItem?.baseUrl || null
-    };
-  }
-
-  function renderList(items) {
-    els.list.innerHTML = '';
-    if (!items || items.length === 0) {
-      renderEmpty('Видео не загружены. Нажмите «Обновить список».');
-      return;
-    }
-    for (const it of items) {
-      const li = document.createElement('li');
-      li.textContent = it.title || it.id;
-      li.dataset.id = it.id;
-      li.addEventListener('click', () => play(it.id));
-      els.list.appendChild(li);
-    }
-  }
-
-  function renderEmpty(msg) {
-    els.list.innerHTML = '';
-    const li = document.createElement('li');
-    li.className = 'empty';
-    li.textContent = msg;
-    els.list.appendChild(li);
-  }
-
-  function clearPlayer() {
-    els.video.removeAttribute('src');
-    els.video.load();
-    setText(els.title, 'Ничего не выбрано');
-    state.activeId = null;
-  }
-
-  function selectRow(id) {
-    [...els.list.querySelectorAll('li')].forEach(li => {
-      li.style.background = li.dataset.id === id ? '#f0f6ff' : '';
-    });
-  }
-
-  function resolveStreamUrl(item) {
-    // 1) Если сервер уже вернул прямой streamUrl (с проксированием токена) — используем его
-    if (item.streamUrl) return item.streamUrl;
-
-    // 2) Серверная ручка по id
-    if (item.id) return api.stream(item.id);
-
-    // 3) По baseUrl (Photos API) можно попробовать добавить "=dv"
-    if (item.baseUrl) return `${item.baseUrl}=dv`;
-
-    // 4) Ничего не нашли
-    return null;
-    }
-
-  function play(id) {
-    const item = state.items.find(i => i.id === id);
-    if (!item) return;
-
-    const url = resolveStreamUrl(item);
-    if (!url) {
-      showError('Не удалось составить ссылку для воспроизведения');
-      return;
-    }
-
-    state.activeId = id;
-    selectRow(id);
-    setText(els.title, item.title || item.id);
-
-    // Ставим источник и проигрываем
-    els.video.pause();
-    els.video.src = url;
-    els.video.load();
-    // Автовоспроизведение может блокироваться браузером — без ошибок
-    els.video.play().catch(() => {});
-  }
-
-  // ---------- init ----------
-
-  function bindUI() {
-    els.login.addEventListener('click', login);
-    els.logout.addEventListener('click', logout);
-    els.refresh.addEventListener('click', loadVideos);
-  }
-
-  async function init() {
-    bindUI();
-    await checkAuth();
-    if (state.authed) {
-      await loadVideos();
+refreshBtn.addEventListener('click', async () => {
+  try {
+    const data = await getJSON('/api/videos');
+    renderList(data.items || []);
+  } catch (e) {
+    if (e.message === '401') {
+      alert('Нужно войти в Google. Нажмите «Войти».');
+    } else if (e.message === '403') {
+      alert('Недостаточно прав (PERMISSION_DENIED). Проверьте, что на выдаче разрешен доступ к Google Photos.');
     } else {
-      renderEmpty('Войдите в аккаунт Google, чтобы увидеть список ваших видео.');
+      alert('Не удалось загрузить список видео.');
     }
   }
+});
 
-  document.addEventListener('DOMContentLoaded', init);
+function renderList(items) {
+  list.innerHTML = '';
+  if (!items.length) {
+    emptyLabel.style.display = 'block';
+    return;
+  }
+  emptyLabel.style.display = 'none';
+
+  items.forEach((it) => {
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.innerHTML = `
+      <div class="mono">${escapeHTML(it.filename || it.id)}</div>
+      <div class="muted" style="margin-top:6px">${escapeHTML(it.mimeType || '')}</div>
+    `;
+    card.addEventListener('click', () => {
+      player.pause();
+      player.querySelector('source').src = it.playerSrc;
+      player.load();
+      player.play().catch(() => {});
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+    list.appendChild(card);
+  });
+}
+
+function escapeHTML(s) {
+  return (s || '').replace(/[&<>"']/g, (ch) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#039;'
+  }[ch]));
+}
+
+// Старт
+(async function init() {
+  await updateAuthUI();
+  // Если уже вошли — сразу подтянем список
+  if (AUTH.authenticated) {
+    try {
+      const data = await getJSON('/api/videos');
+      renderList(data.items || []);
+    } catch (_) {}
+  }
 })();
