@@ -1,142 +1,80 @@
-// server.js
-require('dotenv').config();
-
+/* eslint-disable no-console */
+const path = require('path');
 const express = require('express');
 const session = require('express-session');
-const path = require('path');
+const fetch = require('node-fetch'); // v2 (CommonJS)
 const { google } = require('googleapis');
+require('dotenv').config();
 
-// ----------------------------
-// Константы и вспомогалки
-// ----------------------------
-const SCOPES = ['https://www.googleapis.com/auth/photoslibrary.readonly'];
-const SESSION_SECRET = process.env.SESSION_SECRET || 'dev-secret-change-me';
-const CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
-const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
+const {
+  GOOGLE_CLIENT_ID,
+  GOOGLE_CLIENT_SECRET,
+  SESSION_SECRET = 'change-me',
+  RENDER_EXTERNAL_URL
+} = process.env;
 
-// Без этих двух переменных OAuth не заработает
-if (!CLIENT_ID || !CLIENT_SECRET) {
-  console.error('Missing GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET in env.');
-  process.exit(1);
+if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
+  console.error(
+    '❌ GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET не заданы. ' +
+    'Добавьте их в переменные окружения Render (или .env).'
+  );
 }
 
 const app = express();
-app.set('trust proxy', 1); // чтобы корректно брать https на Render
+app.set('trust proxy', 1); // Render/прокси
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
-app.use(
-  session({
-    secret: SESSION_SECRET,
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-      sameSite: 'lax',
-      secure: 'auto', // true за прокси, false локально — auto подойдёт
-    },
-  })
-);
-
-// Статика (ваш index.html, main.js и т.п. лежат в /public)
-app.use(express.static(path.join(__dirname, 'public')));
-
-// Достаём "базовый" URL сервера (нужно для redirect_uri)
-function getBaseUrl(req) {
-  // Если руками задали в Render → используем
-  if (process.env.RENDER_EXTERNAL_URL) {
-    return process.env.RENDER_EXTERNAL_URL.replace(/\/+$/, '');
+app.use(session({
+  name: 'ghp.sid',
+  secret: SESSION_SECRET,
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    sameSite: 'lax',
+    secure: true,    // Render — только https
+    httpOnly: true,
+    maxAge: 1000 * 60 * 60 * 12 // 12h
   }
-  // Иначе собираем из заголовков (работает и локально, и за прокси)
-  const proto = (req.headers['x-forwarded-proto'] || req.protocol || 'http').split(',')[0].trim();
-  const host = req.headers['x-forwarded-host'] || req.headers.host;
-  return `${proto}://${host}`;
-}
+}));
+
+// ----------- OAuth2 Клиент -----------
 function getRedirectUri(req) {
-  return `${getBaseUrl(req)}/auth/google/callback`;
+  // Лучше задавать явно через переменную окружения
+  if (RENDER_EXTERNAL_URL) return `${RENDER_EXTERNAL_URL.replace(/\/+$/, '')}/oauth2callback`;
+  const proto = (req.headers['x-forwarded-proto'] || 'https').split(',')[0];
+  return `${proto}://${req.headers.host}/oauth2callback`;
 }
 
-// Клиент OAuth2 (redirect_uri подставляем на каждом запросе)
-function oauthClientFor(req) {
-  return new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, getRedirectUri(req));
+function makeOAuthClient(req) {
+  const redirectUri = getRedirectUri(req);
+  return new google.auth.OAuth2(
+    GOOGLE_CLIENT_ID,
+    GOOGLE_CLIENT_SECRET,
+    redirectUri
+  );
 }
 
-// Обновляем токен в сессии, когда googleapis его рефрешит
-function wireTokenPersistence(oauth2, req) {
-  oauth2.on('tokens', (tokens) => {
-    req.session.tokens = { ...(req.session.tokens || {}), ...tokens };
-  });
-}
+// ----------- Авторизация -----------
+const SCOPE_READONLY = ['https://www.googleapis.com/auth/photoslibrary.readonly'];
 
-// Убедиться, что у нас есть валидный access_token.
-// Если нужно — обновит его по refresh_token.
-async function ensureAccessToken(req) {
-  if (!req.session.tokens) return null;
-
-  const oauth2 = oauthClientFor(req);
-  wireTokenPersistence(oauth2, req);
-  oauth2.setCredentials(req.session.tokens);
-
-  // getAccessToken сам рефрешит, если нужно
-  const { token } = await oauth2.getAccessToken();
-  if (!token) return null;
-
-  // Сохраним текущее состояние (на случай, если обновился expiry_date)
-  req.session.tokens = { ...oauth2.credentials };
-  return token;
-}
-
-// Обёртка для запросов к Photos Library API
-async function photosFetch(req, path, { method = 'GET', body } = {}) {
-  const accessToken = await ensureAccessToken(req);
-  if (!accessToken) {
-    return { status: 401, data: { error: 'not_authenticated' } };
-  }
-
-  const url = `https://photoslibrary.googleapis.com${path}`;
-  const res = await fetch(url, {
-    method,
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-
-  const data = await res.json().catch(() => ({}));
-  return { status: res.status, data };
-}
-
-// ------------------------------------
-// OAuth: вход и коллбек
-// ------------------------------------
 app.get('/auth/google', (req, res) => {
-  const oauth2 = oauthClientFor(req);
+  const oauth2 = makeOAuthClient(req);
   const url = oauth2.generateAuthUrl({
-    access_type: 'offline',
-    prompt: 'consent', // форсит выдачу refresh_token при повторном входе
-    scope: SCOPES,
-    redirect_uri: getRedirectUri(req),
+    access_type: 'offline',   // refresh_token
+    prompt: 'consent',        // чтобы refresh выдали стабильно
+    scope: SCOPE_READONLY
   });
-  // Сохраним redirect_uri в сессию (бывает полезно)
-  req.session.redirect_uri = getRedirectUri(req);
   res.redirect(url);
 });
 
-app.get('/auth/google/callback', async (req, res) => {
-  const code = req.query.code;
-  if (!code) return res.status(400).send('Missing code');
-
-  const oauth2 = oauthClientFor(req);
-  wireTokenPersistence(oauth2, req);
-
+app.get('/oauth2callback', async (req, res) => {
   try {
-    const { tokens } = await oauth2.getToken({
-      code,
-      redirect_uri: req.session.redirect_uri || getRedirectUri(req),
-    });
-    oauth2.setCredentials(tokens);
-    req.session.tokens = { ...tokens };
+    const oauth2 = makeOAuthClient(req);
+    const { code } = req.query;
+    const { tokens } = await oauth2.getToken(code);
+    req.session.tokens = tokens;   // сохраняем в сессию
     res.redirect('/');
   } catch (err) {
     console.error('OAuth callback error:', err?.response?.data || err);
@@ -144,125 +82,167 @@ app.get('/auth/google/callback', async (req, res) => {
   }
 });
 
-// ------------------------------------
-// API: список видео
-// ------------------------------------
-// Возвращает до ~200 видео (пагинация по 50)
-app.get('/api/videos', async (req, res) => {
-  if (!req.session.tokens) return res.status(401).json({ error: 'not_authenticated' });
+app.post('/logout', (req, res) => {
+  req.session.destroy(() => res.json({ ok: true }));
+});
 
+// ----------- Статика (клиент) -----------
+app.use(express.static(path.join(__dirname, 'public')));
+
+// ----------- Мидлвэр: нужна авторизация -----------
+function requireAuth(req, res, next) {
+  if (!req.session.tokens || !req.session.tokens.access_token) {
+    return res.status(401).json({ error: 'not_authenticated' });
+  }
+  next();
+}
+
+function makePhotosClient(req) {
+  const oauth2 = makeOAuthClient(req);
+  oauth2.setCredentials(req.session.tokens);
+  return google.photoslibrary({ version: 'v1', auth: oauth2 });
+}
+
+// ----------- API: список видео -----------
+app.get('/api/videos', requireAuth, async (req, res) => {
   try {
-    const collected = [];
-    let pageToken = undefined;
+    const photos = makePhotosClient(req);
 
-    for (let i = 0; i < 4; i++) {
-      const body = {
-        pageSize: 50,
-        pageToken,
-        filters: {
-          mediaTypeFilter: { mediaTypes: ['VIDEO'] },
-        },
-        orderBy: 'MediaMetadata.creation_time desc',
-      };
-
-      const { status, data } = await photosFetch(req, '/v1/mediaItems:search', {
-        method: 'POST',
-        body,
-      });
-
-      if (status !== 200) {
-        return res.status(status).json({ error: 'upstream_error', details: data });
+    // Фильтр по типу "VIDEO"
+    const body = {
+      pageSize: 50,
+      filters: {
+        mediaTypeFilter: { mediaTypes: ['VIDEO'] }
       }
+    };
+    if (req.query.pageToken) body.pageToken = req.query.pageToken;
 
-      if (Array.isArray(data.mediaItems)) {
-        collected.push(
-          ...data.mediaItems.map((m) => ({
-            id: m.id,
-            productUrl: m.productUrl,
-            baseUrl: m.baseUrl,
-            mimeType: m.mimeType,
-            filename: m.filename,
-            mediaMetadata: m.mediaMetadata,
-          }))
-        );
-      }
+    const { data } = await photos.mediaItems.search({ requestBody: body });
 
-      if (!data.nextPageToken) break;
-      pageToken = data.nextPageToken;
-    }
+    const items = (data.mediaItems || []).map((m) => ({
+      id: m.id,
+      filename: m.filename,
+      mimeType: m.mimeType,
+      baseUrl: m.baseUrl,               // для скачивания добавляем '=dv'
+      creationTime: m.mediaMetadata?.creationTime
+    }));
 
-    res.json({ items: collected });
-  } catch (e) {
-    console.error('videos error', e);
-    res.status(500).json({ error: 'server_error' });
+    res.json({
+      items,
+      nextPageToken: data.nextPageToken || null
+    });
+  } catch (err) {
+    const payload = err?.response?.data || { message: String(err) };
+    console.error('[VIDEOS] list error:', payload);
+    res.status(502).json({ error: 'upstream_error', details: payload });
   }
 });
 
-// Выход: отзываем токены и чистим сессию
-app.post('/api/logout', async (req, res) => {
+// ----------- API: стрим видео по id -----------
+app.get('/api/stream/:id', requireAuth, async (req, res) => {
   try {
-    const token = req.session?.tokens?.access_token || req.session?.tokens?.refresh_token;
-    if (token) {
-      await fetch('https://oauth2.googleapis.com/revoke', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({ token }),
-      }).catch(() => {});
+    const { id } = req.params;
+    const photos = makePhotosClient(req);
+    const { data } = await photos.mediaItems.get({ mediaItemId: id });
+
+    if (!data || !data.baseUrl) {
+      return res.status(404).send('Media item not found');
     }
-  } finally {
-    req.session.destroy(() => res.json({ ok: true }));
+
+    // Для видео — параметр '=dv' (docs: baseUrl + '=dv' — download video)
+    const downloadUrl = `${data.baseUrl}=dv`;
+
+    // Проксируем поток
+    const r = await fetch(downloadUrl);
+    if (!r.ok) {
+      const text = await r.text();
+      console.error('Fetch baseUrl error', r.status, text);
+      return res.status(502).send('Failed to fetch video');
+    }
+
+    // Пробросим тип и длину если есть
+    if (r.headers.get('content-type')) {
+      res.setHeader('Content-Type', r.headers.get('content-type'));
+    } else {
+      res.setHeader('Content-Type', data.mimeType || 'video/webm');
+    }
+    if (r.headers.get('content-length')) {
+      res.setHeader('Content-Length', r.headers.get('content-length'));
+    }
+
+    r.body.pipe(res);
+  } catch (err) {
+    console.error('[STREAM] error:', err?.response?.data || err);
+    res.status(502).send('stream_error');
   }
 });
 
-// ------------------------------------
-// DEBUG-эндпоинты (очень помогают в настройке)
-// ------------------------------------
-
-// Что лежит в сессии
+// ----------- DEBUG -----------
 app.get('/debug/this-token', (req, res) => {
-  const t = req.session.tokens || {};
+  const t = req.session.tokens;
+  if (!t) return res.json({ error: 'no_session_tokens' });
   res.json({
-    tokenStartsWith: t.access_token ? t.access_token.slice(0, 12) + '…' : null,
-    scopes: typeof t.scope === 'string' ? t.scope.split(/\s+/) : t.scopes || t.scope,
-    expiry: t.expiry_date || null,
+    tokenStartsWith: String(t.access_token || '').slice(0, 12) + '…',
+    scopes: (t.scope ? String(t.scope).split(' ') : undefined),
+    expiry: t.expiry_date
   });
 });
 
-// tokeninfo от Google (что реально «видит» Google по этому access_token)
-app.get('/debug/tokeninfo', async (req, res) => {
-  const token = await ensureAccessToken(req);
-  if (!token) return res.json({ error: 'not_authenticated' });
-
-  const r = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${encodeURIComponent(token)}`);
-  const data = await r.json().catch(() => ({}));
-  res.json(data);
-});
-
-// Прямые проверки к Photos API (чтобы видеть статусы 200/403)
-app.get('/debug/videos', async (req, res) => {
-  // 1) POST search (нужен, чтобы фильтровать видео)
-  const search = await photosFetch(req, '/v1/mediaItems:search', {
-    method: 'POST',
-    body: {
-      pageSize: 1,
-      filters: { mediaTypeFilter: { mediaTypes: ['VIDEO'] } },
-    },
-  });
-
-  // 2) GET list (просто «как есть», без фильтра)
-  const list = await photosFetch(req, '/v1/mediaItems?pageSize=5');
-
+app.get('/debug/token', (req, res) => {
+  const t = req.session.tokens;
+  if (!t || !t.access_token) return res.json({ error: 'not_authenticated' });
   res.json({
-    search,
-    list,
+    scopes: (t.scope ? String(t.scope).split(' ') : undefined),
+    expiry: t.expiry_date
   });
 });
 
-// ------------------------------------
-// Запуск
-// ------------------------------------
+app.get('/debug/tokeninfo', requireAuth, async (req, res) => {
+  try {
+    const oauth2 = google.oauth2({ version: 'v2' });
+    const { tokens } = {
+      tokens: req.session.tokens
+    };
+    // endpoint tokeninfo в v3 устарел; используем v2 userinfo как «живой» пинг
+    const me = await oauth2.userinfo.get({
+      auth: makeOAuthClient({ headers: {}, session: req.session, ...req })
+    });
+    res.json({
+      email: me.data.email || null,
+      scope: req.session.tokens.scope,
+      exp: req.session.tokens.expiry_date,
+      access_type: 'offline'
+    });
+  } catch (e) {
+    res.status(500).json({ error: 'tokeninfo_failed' });
+  }
+});
+
+app.get('/debug/videos', requireAuth, async (req, res) => {
+  const photos = makePhotosClient(req);
+  try {
+    const search = await photos.mediaItems.search({
+      requestBody: {
+        pageSize: 1,
+        filters: { mediaTypeFilter: { mediaTypes: ['VIDEO'] } }
+      }
+    });
+    const list = await photos.mediaItems.list({ pageSize: 1 });
+    res.json({
+      search: { status: 200, total: (search.data.mediaItems || []).length },
+      list: { status: 200, total: (list.data.mediaItems || []).length }
+    });
+  } catch (err) {
+    const data = err?.response?.data || { message: String(err) };
+    res.json({
+      search: { status: err?.response?.status || 500, data },
+      list: { status: err?.response?.status || 500, data }
+    });
+  }
+});
+
+// ----------- Запуск -----------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log('Server listening on', PORT);
-  console.log('Scopes:', SCOPES.join(' '));
+  console.log('✅ Server listening on', PORT);
 });
