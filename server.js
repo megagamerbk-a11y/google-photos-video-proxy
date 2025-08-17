@@ -1,311 +1,268 @@
 // server.js
-// Node 18+ (есть fetch), Express + Passport Google OAuth2
+require('dotenv').config();
 
-import express from 'express';
-import path from 'path';
-import session from 'express-session';
-import passport from 'passport';
-import { Strategy as GoogleStrategy } from 'passport-google-oauth20';
+const express = require('express');
+const session = require('express-session');
+const path = require('path');
+const { google } = require('googleapis');
+
+// ----------------------------
+// Константы и вспомогалки
+// ----------------------------
+const SCOPES = ['https://www.googleapis.com/auth/photoslibrary.readonly'];
+const SESSION_SECRET = process.env.SESSION_SECRET || 'dev-secret-change-me';
+const CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
+
+// Без этих двух переменных OAuth не заработает
+if (!CLIENT_ID || !CLIENT_SECRET) {
+  console.error('Missing GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET in env.');
+  process.exit(1);
+}
 
 const app = express();
-app.set('trust proxy', 1); // для корректных secure cookie за reverse proxy (Render)
+app.set('trust proxy', 1); // чтобы корректно брать https на Render
 
-// ---------- Конфиг ----------
-const PORT = process.env.PORT || 3000;
-const BASE_URL =
-  (process.env.RENDER_EXTERNAL_URL?.replace(/\/$/, '')) ||
-  `http://localhost:${PORT}`;
+app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
 
-const SCOPES = [
-  'https://www.googleapis.com/auth/photoslibrary.readonly'
-];
-
-// ---------- Сессии ----------
 app.use(
   session({
-    name: 'gpp.sid',
-    secret: process.env.SESSION_SECRET || 'dev-secret',
+    secret: SESSION_SECRET,
     resave: false,
     saveUninitialized: false,
     cookie: {
-      httpOnly: true,
       sameSite: 'lax',
-      secure: BASE_URL.startsWith('https://')
-    }
+      secure: 'auto', // true за прокси, false локально — auto подойдёт
+    },
   })
 );
 
-// ---------- Passport ----------
-passport.serializeUser((user, done) => {
-  done(null, user);
-});
-passport.deserializeUser((obj, done) => {
-  done(null, obj);
-});
+// Статика (ваш index.html, main.js и т.п. лежат в /public)
+app.use(express.static(path.join(__dirname, 'public')));
 
-passport.use(
-  new GoogleStrategy(
-    {
-      clientID: process.env.GOOGLE_CLIENT_ID,
-      clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-      callbackURL: `${BASE_URL}/auth/google/callback`,
-      scope: SCOPES,
-      prompt: 'consent',            // просим заново согласиться
-      accessType: 'offline',        // нужен refresh_token
-      includeGrantedScopes: false   // не склеивать со старыми скоупами
-    },
-    (accessToken, refreshToken, params, profile, done) => {
-      // params.expires_in — в секундах; params.scope может отсутствовать
-      const scopeStr = params.scope || '';
-      const scopes = scopeStr ? scopeStr.split(' ') : [];
-      const expiresAt = Date.now() + (Number(params.expires_in || 0) * 1000);
-      const user = {
-        id: profile.id,
-        displayName: profile.displayName,
-        tokens: {
-          access_token: accessToken,
-          refresh_token: refreshToken || null,
-          scopes,
-          expiresAt
-        }
-      };
-      return done(null, user);
-    }
-  )
-);
-
-app.use(passport.initialize());
-app.use(passport.session());
-
-// ---------- Хелперы ----------
-function ensureAuthed(req, res, next) {
-  if (req.isAuthenticated && req.isAuthenticated()) return next();
-  return res.status(401).json({ error: 'not_authenticated' });
+// Достаём "базовый" URL сервера (нужно для redirect_uri)
+function getBaseUrl(req) {
+  // Если руками задали в Render → используем
+  if (process.env.RENDER_EXTERNAL_URL) {
+    return process.env.RENDER_EXTERNAL_URL.replace(/\/+$/, '');
+  }
+  // Иначе собираем из заголовков (работает и локально, и за прокси)
+  const proto = (req.headers['x-forwarded-proto'] || req.protocol || 'http').split(',')[0].trim();
+  const host = req.headers['x-forwarded-host'] || req.headers.host;
+  return `${proto}://${host}`;
+}
+function getRedirectUri(req) {
+  return `${getBaseUrl(req)}/auth/google/callback`;
 }
 
-function getToken(req) {
-  return req.user?.tokens?.access_token || null;
-}
-function getRefreshToken(req) {
-  return req.user?.tokens?.refresh_token || null;
-}
-function getExpiry(req) {
-  return req.user?.tokens?.expiresAt || 0;
+// Клиент OAuth2 (redirect_uri подставляем на каждом запросе)
+function oauthClientFor(req) {
+  return new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, getRedirectUri(req));
 }
 
-async function refreshAccessToken(req) {
-  const refreshToken = getRefreshToken(req);
-  if (!refreshToken) return false;
-
-  const body = new URLSearchParams({
-    client_id: process.env.GOOGLE_CLIENT_ID,
-    client_secret: process.env.GOOGLE_CLIENT_SECRET,
-    grant_type: 'refresh_token',
-    refresh_token: refreshToken
+// Обновляем токен в сессии, когда googleapis его рефрешит
+function wireTokenPersistence(oauth2, req) {
+  oauth2.on('tokens', (tokens) => {
+    req.session.tokens = { ...(req.session.tokens || {}), ...tokens };
   });
-
-  const resp = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body
-  });
-
-  if (!resp.ok) {
-    const text = await resp.text();
-    console.error('refresh token failed:', resp.status, text);
-    return false;
-  }
-
-  const data = await resp.json();
-  // { access_token, expires_in, scope, token_type }
-  req.user.tokens.access_token = data.access_token;
-  req.user.tokens.expiresAt = Date.now() + Number(data.expires_in) * 1000;
-
-  // Иногда Google возвращает scope строкой
-  if (data.scope) {
-    req.user.tokens.scopes = data.scope.split(' ');
-  }
-  return true;
 }
 
-async function ensureValidToken(req) {
-  const skew = 60 * 1000; // за минуту до истечения — обновим
-  if (!getToken(req)) return false;
-  if (Date.now() < getExpiry(req) - skew) return true;
-  return await refreshAccessToken(req);
+// Убедиться, что у нас есть валидный access_token.
+// Если нужно — обновит его по refresh_token.
+async function ensureAccessToken(req) {
+  if (!req.session.tokens) return null;
+
+  const oauth2 = oauthClientFor(req);
+  wireTokenPersistence(oauth2, req);
+  oauth2.setCredentials(req.session.tokens);
+
+  // getAccessToken сам рефрешит, если нужно
+  const { token } = await oauth2.getAccessToken();
+  if (!token) return null;
+
+  // Сохраним текущее состояние (на случай, если обновился expiry_date)
+  req.session.tokens = { ...oauth2.credentials };
+  return token;
 }
 
-async function gphotosFetch(req, endpoint, { method = 'GET', body } = {}) {
-  await ensureValidToken(req);
-  const token = getToken(req);
-
-  const url = endpoint.startsWith('http')
-    ? endpoint
-    : `https://photoslibrary.googleapis.com/v1/${endpoint}`;
-
-  const headers = {
-    Authorization: `Bearer ${token}`
-  };
-  if (body && typeof body === 'object' && method !== 'GET') {
-    headers['Content-Type'] = 'application/json';
+// Обёртка для запросов к Photos Library API
+async function photosFetch(req, path, { method = 'GET', body } = {}) {
+  const accessToken = await ensureAccessToken(req);
+  if (!accessToken) {
+    return { status: 401, data: { error: 'not_authenticated' } };
   }
 
-  const resp = await fetch(url, {
+  const url = `https://photoslibrary.googleapis.com${path}`;
+  const res = await fetch(url, {
     method,
-    headers,
-    body: body && typeof body === 'object' ? JSON.stringify(body) : body
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: body ? JSON.stringify(body) : undefined,
   });
 
-  return resp;
+  const data = await res.json().catch(() => ({}));
+  return { status: res.status, data };
 }
 
-// ---------- Роуты авторизации ----------
-app.get('/auth/google', (req, res, next) => {
-  passport.authenticate('google', { scope: SCOPES })(req, res, next);
-});
-
-app.get(
-  '/auth/google/callback',
-  passport.authenticate('google', {
-    failureRedirect: '/?auth=failed'
-  }),
-  (req, res) => res.redirect('/')
-);
-
-app.post('/logout', ensureAuthed, (req, res, next) => {
-  req.logout(err => {
-    if (err) return next(err);
-    req.session.destroy(() => {
-      res.clearCookie('gpp.sid');
-      res.status(204).end();
-    });
+// ------------------------------------
+// OAuth: вход и коллбек
+// ------------------------------------
+app.get('/auth/google', (req, res) => {
+  const oauth2 = oauthClientFor(req);
+  const url = oauth2.generateAuthUrl({
+    access_type: 'offline',
+    prompt: 'consent', // форсит выдачу refresh_token при повторном входе
+    scope: SCOPES,
+    redirect_uri: getRedirectUri(req),
   });
+  // Сохраним redirect_uri в сессию (бывает полезно)
+  req.session.redirect_uri = getRedirectUri(req);
+  res.redirect(url);
 });
 
-// ---------- API ----------
-app.get('/api/me', ensureAuthed, async (req, res) => {
-  const info = {
-    displayName: req.user.displayName,
-    tokenExpiresAt: req.user.tokens.expiresAt,
-    scopes: req.user.tokens.scopes
-  };
-  res.json(info);
-});
+app.get('/auth/google/callback', async (req, res) => {
+  const code = req.query.code;
+  if (!code) return res.status(400).send('Missing code');
 
-app.get('/api/videos', ensureAuthed, async (req, res) => {
+  const oauth2 = oauthClientFor(req);
+  wireTokenPersistence(oauth2, req);
+
   try {
-    // 1) Поиск только видео
-    const searchResp = await gphotosFetch(req, 'mediaItems:search', {
-      method: 'POST',
-      body: {
-        pageSize: 50,
-        filters: {
-          mediaTypeFilter: { mediaTypes: ['VIDEO'] }
-        }
-      }
+    const { tokens } = await oauth2.getToken({
+      code,
+      redirect_uri: req.session.redirect_uri || getRedirectUri(req),
     });
+    oauth2.setCredentials(tokens);
+    req.session.tokens = { ...tokens };
+    res.redirect('/');
+  } catch (err) {
+    console.error('OAuth callback error:', err?.response?.data || err);
+    res.status(500).send('OAuth error');
+  }
+});
 
-    if (!searchResp.ok) {
-      const errText = await searchResp.text();
-      return res
-        .status(searchResp.status)
-        .json({ error: 'upstream_error', detail: errText });
+// ------------------------------------
+// API: список видео
+// ------------------------------------
+// Возвращает до ~200 видео (пагинация по 50)
+app.get('/api/videos', async (req, res) => {
+  if (!req.session.tokens) return res.status(401).json({ error: 'not_authenticated' });
+
+  try {
+    const collected = [];
+    let pageToken = undefined;
+
+    for (let i = 0; i < 4; i++) {
+      const body = {
+        pageSize: 50,
+        pageToken,
+        filters: {
+          mediaTypeFilter: { mediaTypes: ['VIDEO'] },
+        },
+        orderBy: 'MediaMetadata.creation_time desc',
+      };
+
+      const { status, data } = await photosFetch(req, '/v1/mediaItems:search', {
+        method: 'POST',
+        body,
+      });
+
+      if (status !== 200) {
+        return res.status(status).json({ error: 'upstream_error', details: data });
+      }
+
+      if (Array.isArray(data.mediaItems)) {
+        collected.push(
+          ...data.mediaItems.map((m) => ({
+            id: m.id,
+            productUrl: m.productUrl,
+            baseUrl: m.baseUrl,
+            mimeType: m.mimeType,
+            filename: m.filename,
+            mediaMetadata: m.mediaMetadata,
+          }))
+        );
+      }
+
+      if (!data.nextPageToken) break;
+      pageToken = data.nextPageToken;
     }
 
-    const data = await searchResp.json();
-    const items = (data.mediaItems || []).map(m => ({
-      id: m.id,
-      filename: m.filename,
-      mimeType: m.mimeType,
-      baseUrl: m.baseUrl // для превью/иконки; поток — через /video/:id
-    }));
-
-    res.json({ items });
+    res.json({ items: collected });
   } catch (e) {
-    console.error(e);
+    console.error('videos error', e);
     res.status(500).json({ error: 'server_error' });
   }
 });
 
-// Проксирование видео потока (используем baseUrl=dv)
-app.get('/video/:id', ensureAuthed, async (req, res) => {
+// Выход: отзываем токены и чистим сессию
+app.post('/api/logout', async (req, res) => {
   try {
-    const itemResp = await gphotosFetch(req, `mediaItems/${req.params.id}`);
-    if (!itemResp.ok) {
-      const t = await itemResp.text();
-      return res.status(itemResp.status).send(t);
+    const token = req.session?.tokens?.access_token || req.session?.tokens?.refresh_token;
+    if (token) {
+      await fetch('https://oauth2.googleapis.com/revoke', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ token }),
+      }).catch(() => {});
     }
-    const item = await itemResp.json();
-    if (!item.baseUrl) {
-      return res.status(404).json({ error: 'no_baseUrl' });
-    }
-
-    // dv — "download video" поток
-    const vidUrl = `${item.baseUrl}=dv`;
-    const upstream = await gphotosFetch(req, vidUrl);
-
-    res.status(upstream.status);
-    // прокидываем часть заголовков
-    upstream.headers.forEach((v, k) => {
-      if (!['transfer-encoding', 'content-encoding'].includes(k.toLowerCase())) {
-        res.setHeader(k, v);
-      }
-    });
-
-    if (upstream.body) upstream.body.pipe(res);
-    else res.end();
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: 'proxy_failed' });
+  } finally {
+    req.session.destroy(() => res.json({ ok: true }));
   }
 });
 
-// ---------- Debug ----------
-app.get('/debug/this-token', ensureAuthed, (req, res) => {
+// ------------------------------------
+// DEBUG-эндпоинты (очень помогают в настройке)
+// ------------------------------------
+
+// Что лежит в сессии
+app.get('/debug/this-token', (req, res) => {
+  const t = req.session.tokens || {};
   res.json({
-    tokenStartsWith: (req.user.tokens.access_token || '').slice(0, 12),
-    scopes: req.user.tokens.scopes,
-    expiry: req.user.tokens.expiresAt
+    tokenStartsWith: t.access_token ? t.access_token.slice(0, 12) + '…' : null,
+    scopes: typeof t.scope === 'string' ? t.scope.split(/\s+/) : t.scopes || t.scope,
+    expiry: t.expiry_date || null,
   });
 });
 
-app.get('/debug/tokeninfo', ensureAuthed, async (req, res) => {
-  const t = getToken(req);
-  const r = await fetch(
-    `https://www.googleapis.com/oauth2/v3/tokeninfo?access_token=${encodeURIComponent(
-      t
-    )}`
-  );
-  res.status(r.status).send(await r.text());
+// tokeninfo от Google (что реально «видит» Google по этому access_token)
+app.get('/debug/tokeninfo', async (req, res) => {
+  const token = await ensureAccessToken(req);
+  if (!token) return res.json({ error: 'not_authenticated' });
+
+  const r = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${encodeURIComponent(token)}`);
+  const data = await r.json().catch(() => ({}));
+  res.json(data);
 });
 
-app.get('/debug/videos', ensureAuthed, async (req, res) => {
-  const out = {};
-  try {
-    const s = await gphotosFetch(req, 'mediaItems:search', {
-      method: 'POST',
-      body: { pageSize: 1, filters: { mediaTypeFilter: { mediaTypes: ['VIDEO'] } } }
-    });
-    out.search = { status: s.status, data: s.ok ? await s.json() : await s.text() };
+// Прямые проверки к Photos API (чтобы видеть статусы 200/403)
+app.get('/debug/videos', async (req, res) => {
+  // 1) POST search (нужен, чтобы фильтровать видео)
+  const search = await photosFetch(req, '/v1/mediaItems:search', {
+    method: 'POST',
+    body: {
+      pageSize: 1,
+      filters: { mediaTypeFilter: { mediaTypes: ['VIDEO'] } },
+    },
+  });
 
-    const l = await gphotosFetch(req, 'mediaItems?pageSize=1');
-    out.list = { status: l.status, data: l.ok ? await l.json() : await l.text() };
-  } catch (e) {
-    out.error = String(e);
-  }
-  res.json(out);
+  // 2) GET list (просто «как есть», без фильтра)
+  const list = await photosFetch(req, '/v1/mediaItems?pageSize=5');
+
+  res.json({
+    search,
+    list,
+  });
 });
 
-// ---------- Статика ----------
-const __dirname = path.dirname(new URL(import.meta.url).pathname);
-app.use(express.static(path.join(__dirname, 'public')));
-
-// Фолбэк на index (если нужен одностраничный интерфейс)
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
-
-// ---------- Старт ----------
+// ------------------------------------
+// Запуск
+// ------------------------------------
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Server on ${BASE_URL} (PORT=${PORT})`);
+  console.log('Server listening on', PORT);
+  console.log('Scopes:', SCOPES.join(' '));
 });
