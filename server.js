@@ -39,8 +39,11 @@ const oauth2Client = new google.auth.OAuth2(
   REDIRECT_URI
 );
 
-// Только чтение из Google Photos
-const SCOPE = ["https://www.googleapis.com/auth/photoslibrary.readonly"];
+// Запросим оба скоупа — readonly и полный. В консоли GCP оба должны быть добавлены в Data Access.
+const SCOPES = [
+  "https://www.googleapis.com/auth/photoslibrary.readonly",
+  "https://www.googleapis.com/auth/photoslibrary",
+];
 
 /* -------------------- Helpers -------------------- */
 function ensureAuthed(req, res, next) {
@@ -48,7 +51,11 @@ function ensureAuthed(req, res, next) {
     oauth2Client.setCredentials(req.session.tokens);
     return next();
   }
-  if (req.path.startsWith("/videos") || req.path.startsWith("/stream/") || req.path.startsWith("/debug/")) {
+  if (
+    req.path.startsWith("/videos") ||
+    req.path.startsWith("/stream/") ||
+    req.path.startsWith("/debug/")
+  ) {
     return res.status(401).json({ error: "not_authenticated" });
   }
   return res.redirect("/auth/google");
@@ -82,7 +89,7 @@ app.get("/auth/google", (req, res) => {
   const url = oauth2Client.generateAuthUrl({
     access_type: "offline",
     prompt: "consent",
-    scope: SCOPE,
+    scope: SCOPES,
   });
   res.redirect(url);
 });
@@ -154,7 +161,13 @@ app.get("/videos", ensureAuthed, async (req, res) => {
       return res.json({ items });
     }
 
-    console.error("[VIDEOS] google error (both paths):", searchResp?.status, searchResp?.data, listResp?.status, listResp?.data);
+    console.error(
+      "[VIDEOS] google error (both paths):",
+      searchResp?.status,
+      searchResp?.data,
+      listResp?.status,
+      listResp?.data
+    );
     return res.status(502).json({
       error: "upstream_error",
       searchStatus: searchResp?.status,
@@ -230,6 +243,7 @@ app.get("/stream/:id", ensureAuthed, async (req, res) => {
 });
 
 /* -------------------- DEBUG endpoints -------------------- */
+// Текущий токен из credentials (быстрый взгляд)
 app.get("/debug/token", ensureAuthed, async (req, res) => {
   try {
     const info = await oauth2Client.getTokenInfo(oauth2Client.credentials.access_token);
@@ -239,6 +253,22 @@ app.get("/debug/token", ensureAuthed, async (req, res) => {
   }
 });
 
+// Именно тот access token, который уходит в /videos (через getAccessToken)
+app.get("/debug/this-token", ensureAuthed, async (req, res) => {
+  try {
+    const { token } = await oauth2Client.getAccessToken();
+    const info = await oauth2Client.getTokenInfo(token);
+    res.json({
+      tokenStartsWith: token?.slice(0, 12),
+      scopes: info.scopes,
+      expiry: oauth2Client.credentials.expiry_date,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e?.response?.data || String(e) });
+  }
+});
+
+// Сырые ответы Google для диагностики
 app.get("/debug/videos", ensureAuthed, async (req, res) => {
   try {
     const { token } = await oauth2Client.getAccessToken();
@@ -256,7 +286,7 @@ app.get("/debug/videos", ensureAuthed, async (req, res) => {
 
     res.json({
       search: { status: searchResp.status, data: searchResp.data },
-      list:   { status: listResp.status,   data: listResp.data   }
+      list: { status: listResp.status, data: listResp.data },
     });
   } catch (e) {
     res.status(500).json({ error: e?.response?.data || String(e) });
