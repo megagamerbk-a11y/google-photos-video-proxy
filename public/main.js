@@ -1,129 +1,61 @@
-// public/main.js
+const loginBtn = document.getElementById('login');
+const logoutBtn = document.getElementById('logout');
+const refreshBtn = document.getElementById('refresh');
+const listBox = document.getElementById('list');
+const player = document.getElementById('player');
 
-// ---------- helpers ----------
-const $ = (id) => document.getElementById(id);
-
-function showMessage(text) {
-  // простой оверлей через alert — можно заменить на свой UI
-  alert(text);
+async function pingAuth() {
+  const r = await fetch('/debug/token');
+  const j = await r.json();
+  const authed = !j.error;
+  loginBtn.classList.toggle('hidden', authed);
+  logoutBtn.classList.toggle('hidden', !authed);
+  refreshBtn.classList.toggle('hidden', !authed);
+  return authed;
 }
 
-function escapeHtml(str = "") {
-  return String(str)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
+loginBtn.onclick = () => location.href = '/auth/google';
+logoutBtn.onclick = async () => {
+  await fetch('/logout', { method: 'POST' });
+  location.reload();
+};
+refreshBtn.onclick = () => loadVideos(true);
 
-function formatDate(iso) {
-  if (!iso) return "";
+async function loadVideos(alertErrors=false) {
+  listBox.innerHTML = '';
   try {
-    return new Date(iso).toLocaleString();
-  } catch {
-    return iso;
-  }
-}
-
-// ---------- API ----------
-async function fetchVideos() {
-  let res;
-  try {
-    res = await fetch("/videos", { credentials: "same-origin" });
+    const r = await fetch('/api/videos');
+    const j = await r.json();
+    if (j.error) throw j;
+    if (!j.items?.length) {
+      listBox.innerHTML = '<div>Видео не найдены. Нажмите «Обновить список», либо проверьте, что в Google Photos есть видео.</div>';
+      return;
+    }
+    for (const v of j.items) {
+      const div = document.createElement('div');
+      div.className = 'item';
+      div.innerHTML = `
+        <div style="font-size:13px;opacity:.8">${v.filename || v.id}</div>
+        <button data-id="${v.id}">▶️ Проиграть</button>
+      `;
+      listBox.appendChild(div);
+    }
   } catch (e) {
-    showMessage("Не удалось связаться с сервером. Проверьте интернет и попробуйте ещё раз.");
-    return [];
+    console.error(e);
+    if (alertErrors) alert('Не удалось загрузить список видео: ' + JSON.stringify(e));
   }
-
-  // если не авторизованы — поведём на Google Login
-  if (res.status === 401) {
-    location.href = "/auth/google";
-    return [];
-  }
-
-  if (!res.ok) {
-    // пытаемся достать JSON-ошибку, иначе обрежем HTML
-    let msg = "Не удалось загрузить список видео.";
-    try {
-      const t = await res.text();
-      try {
-        const j = JSON.parse(t);
-        if (j?.error) msg += " " + JSON.stringify(j);
-      } catch {
-        msg += " " + t.slice(0, 200) + (t.length > 200 ? "…" : "");
-      }
-    } catch {}
-    showMessage(msg);
-    return [];
-  }
-
-  const data = await res.json().catch(() => ({}));
-  return Array.isArray(data.items) ? data.items : [];
 }
 
-async function play(id) {
-  const player = $("player");
-  const wrap = $("playerWrap");
+listBox.addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-id]');
+  if (!btn) return;
+  const id = btn.getAttribute('data-id');
+  // Проигрываем через наш прокси (получаем видеопоток)
+  player.src = `/api/stream/${encodeURIComponent(id)}`;
+  player.play().catch(()=>{});
+});
 
-  wrap.textContent = `Загрузка видео…`;
-  player.src = `/stream/${encodeURIComponent(id)}`;
-  player.load();
-  try {
-    await player.play();
-  } catch {
-    // автозапуск может быть заблокирован — ничего страшного
-  }
-  wrap.textContent = "";
-}
-
-// ---------- UI ----------
-function renderList(items) {
-  const list = $("videos");
-  list.innerHTML = "";
-
-  if (!items.length) {
-    const empty = document.createElement("div");
-    empty.className = "muted";
-    empty.textContent =
-      "Видео не найдены. Нажмите «Обновить список», либо проверьте, что в Google Photos есть видео.";
-    list.appendChild(empty);
-    return;
-  }
-
-  items.forEach((mi) => {
-    const el = document.createElement("div");
-    el.className = "card";
-    el.innerHTML = `
-      <div><strong>${escapeHtml(mi.filename || mi.id)}</strong></div>
-      <div class="muted">${formatDate(mi.creationTime)}</div>
-      <div class="muted">${escapeHtml(mi.mimeType || "")}</div>
-    `;
-    el.addEventListener("click", () => play(mi.id));
-    list.appendChild(el);
-  });
-}
-
-// ---------- boot ----------
-async function init() {
-  const refresh = $("refreshBtn");
-  if (refresh) {
-    refresh.addEventListener("click", async () => {
-      refresh.disabled = true;
-      try {
-        const items = await fetchVideos();
-        renderList(items);
-      } finally {
-        refresh.disabled = false;
-      }
-    });
-  }
-
-  // первая подгрузка
-  const items = await fetchVideos();
-  renderList(items);
-
-  // воспроизведение по клику на список — настраивается в renderList
-}
-
-document.addEventListener("DOMContentLoaded", init);
+(async function init() {
+  const ok = await pingAuth();
+  if (ok) loadVideos();
+})();
