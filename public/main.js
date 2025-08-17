@@ -1,99 +1,86 @@
-/* global window, document, fetch, alert */
+(async () => {
+  const btnAuth = document.getElementById("btn-auth");
+  const btnRefresh = document.getElementById("btn-refresh");
+  const list = document.getElementById("list");
+  const emptyList = document.getElementById("empty-list");
+  const player = document.getElementById("player");
 
-const els = {
-  login: document.getElementById("loginBtn"),
-  logout: document.getElementById("logoutBtn"),
-  refresh: document.getElementById("refreshBtn"),
-  list: document.getElementById("list"),
-  empty: document.getElementById("empty"),
-  video: document.getElementById("video"),
-};
+  let authed = false;
 
-function setAuthUI(authed) {
-  els.login.style.display = authed ? "none" : "inline-block";
-  els.logout.style.display = authed ? "inline-block" : "none";
-  els.refresh.disabled = !authed;
-}
-
-async function getMe() {
-  const r = await fetch("/api/me");
-  if (!r.ok) return { authed: false };
-  return r.json();
-}
-
-async function loadVideos() {
-  els.list.innerHTML = "";
-  els.empty.style.display = "none";
-  try {
-    const r = await fetch("/api/videos");
-    const data = await r.json();
-
+  async function getJSON(url) {
+    const r = await fetch(url, { credentials: "same-origin" });
     if (!r.ok) {
-      const detail =
-        data?.listData?.error?.message || data?.message || r.statusText;
-      alert(
-        `Не удалось загрузить список видео.\n${
-          detail || "Попробуйте выполнить вход ещё раз."
-        }`
-      );
-      return;
-    }
-
-    const videos = data?.videos || [];
-    if (!videos.length) {
-      els.empty.style.display = "block";
-      return;
-    }
-
-    for (const v of videos) {
-      const el = document.createElement("div");
-      el.className = "item";
-      el.title = v.filename || v.mimeType;
-
-      el.innerHTML = `
-        <div style="width:36px;height:36px;display:flex;align-items:center;justify-content:center;background:#0b0e14;border-radius:8px;border:1px solid #2b3240">🎬</div>
-        <div style="flex:1;min-width:0">
-          <div class="name">${(v.filename || "").replace(/</g, "&lt;")}</div>
-          <div class="muted">${v.mimeType || ""}</div>
-        </div>
-      `;
-
-      el.addEventListener("click", () => {
-        // Для видео Google Photos: baseUrl + '=dv'
-        const src = `${v.baseUrl}=dv`;
-        els.video.src = src;
-        els.video.play().catch(() => {});
-        // небольшая прокрутка к плееру
-        window.scrollTo({ top: 0, behavior: "smooth" });
+      const text = await r.text().catch(() => "");
+      throw Object.assign(new Error("HTTP " + r.status), {
+        status: r.status,
+        body: text
       });
-
-      els.list.appendChild(el);
     }
-  } catch (e) {
-    alert("Ошибка сети при загрузке списка.");
+    return r.json();
   }
-}
 
-async function init() {
-  const me = await getMe();
-  setAuthUI(me.authed);
+  function setAuthUI() {
+    btnAuth.textContent = authed ? "Выйти" : "Войти с Google";
+    btnRefresh.disabled = !authed;
+  }
 
-  els.login.addEventListener("click", () => {
-    window.location.href = "/auth/google";
-  });
-
-  els.logout.addEventListener("click", async () => {
+  async function checkAuth() {
     try {
-      await fetch("/api/logout");
-    } catch {}
-    window.location.reload();
-  });
-
-  els.refresh.addEventListener("click", loadVideos);
-
-  if (me.authed) {
-    loadVideos();
+      const data = await getJSON("/me");
+      authed = !!data.authed;
+    } catch {
+      authed = false;
+    }
+    setAuthUI();
   }
-}
 
-init();
+  async function loadVideos() {
+    list.innerHTML = "";
+    emptyList.hidden = true;
+
+    try {
+      const data = await getJSON("/api/videos");
+      if (!data.items || !data.items.length) {
+        emptyList.hidden = false;
+        return;
+      }
+
+      for (const item of data.items) {
+        const li = document.createElement("li");
+        li.textContent = item.filename || item.id;
+        li.onclick = () => {
+          player.src = item.url;     // =dv уже добавлен на сервере
+          player.play().catch(() => {});
+        };
+        list.appendChild(li);
+      }
+    } catch (e) {
+      let msg = "Не удалось загрузить список видео.";
+      // Если сервер вернул подробности — покажем
+      try {
+        const parsed = JSON.parse(e.body || "{}");
+        if (parsed?.data?.error?.message) {
+          msg += " " + parsed.data.error.message;
+        }
+      } catch {}
+      alert(msg);
+    }
+  }
+
+  // События
+  btnAuth.onclick = () => {
+    if (authed) {
+      location.href = "/logout";
+    } else {
+      location.href = "/auth/google";
+    }
+  };
+
+  btnRefresh.onclick = () => loadVideos();
+
+  // init
+  await checkAuth();
+  if (authed) {
+    await loadVideos();
+  }
+})();
