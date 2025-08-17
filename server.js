@@ -1,249 +1,311 @@
 // server.js
-// Node >= 18, package.json -> { "type": "module" }
-import express from "express";
-import session from "express-session";
-import axios from "axios";
-import { google } from "googleapis";
-import { registerDebug } from "./debug.js";
+// Node 18+ (есть fetch), Express + Passport Google OAuth2
+
+import express from 'express';
+import path from 'path';
+import session from 'express-session';
+import passport from 'passport';
+import { Strategy as GoogleStrategy } from 'passport-google-oauth20';
 
 const app = express();
+app.set('trust proxy', 1); // для корректных secure cookie за reverse proxy (Render)
+
+// ---------- Конфиг ----------
 const PORT = process.env.PORT || 3000;
+const BASE_URL =
+  (process.env.RENDER_EXTERNAL_URL?.replace(/\/$/, '')) ||
+  `http://localhost:${PORT}`;
 
-/* ───── Base ───── */
-app.set("trust proxy", 1);           // важно для Render (secure cookie)
-app.disable("x-powered-by");
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+const SCOPES = [
+  'https://www.googleapis.com/auth/photoslibrary.readonly'
+];
 
-/* ───── Sessions ───── */
+// ---------- Сессии ----------
 app.use(
   session({
-    name: "sid",
-    secret: process.env.SESSION_SECRET || "dev-secret-change-me",
+    name: 'gpp.sid',
+    secret: process.env.SESSION_SECRET || 'dev-secret',
     resave: false,
     saveUninitialized: false,
     cookie: {
       httpOnly: true,
-      sameSite: "lax",
-      secure: "auto",                  // https -> secure
-      maxAge: 1000 * 60 * 60 * 24 * 7, // 7 дней
-    },
+      sameSite: 'lax',
+      secure: BASE_URL.startsWith('https://')
+    }
   })
 );
 
-/* ───── OAuth ───── */
-const BASE_URL = (process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`).replace(/\/$/, "");
-const REDIRECT_URI = `${BASE_URL}/oauth2/callback`;
+// ---------- Passport ----------
+passport.serializeUser((user, done) => {
+  done(null, user);
+});
+passport.deserializeUser((obj, done) => {
+  done(null, obj);
+});
 
-const oauth2Client = new google.auth.OAuth2(
-  process.env.GOOGLE_CLIENT_ID,
-  process.env.GOOGLE_CLIENT_SECRET,
-  REDIRECT_URI
+passport.use(
+  new GoogleStrategy(
+    {
+      clientID: process.env.GOOGLE_CLIENT_ID,
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+      callbackURL: `${BASE_URL}/auth/google/callback`,
+      scope: SCOPES,
+      prompt: 'consent',            // просим заново согласиться
+      accessType: 'offline',        // нужен refresh_token
+      includeGrantedScopes: false   // не склеивать со старыми скоупами
+    },
+    (accessToken, refreshToken, params, profile, done) => {
+      // params.expires_in — в секундах; params.scope может отсутствовать
+      const scopeStr = params.scope || '';
+      const scopes = scopeStr ? scopeStr.split(' ') : [];
+      const expiresAt = Date.now() + (Number(params.expires_in || 0) * 1000);
+      const user = {
+        id: profile.id,
+        displayName: profile.displayName,
+        tokens: {
+          access_token: accessToken,
+          refresh_token: refreshToken || null,
+          scopes,
+          expiresAt
+        }
+      };
+      return done(null, user);
+    }
+  )
 );
 
-// оба скоупа должны быть добавлены в Google Auth Platform → Data access
-const SCOPES = [
-  "https://www.googleapis.com/auth/photoslibrary.readonly",
-  "https://www.googleapis.com/auth/photoslibrary",
-];
+app.use(passport.initialize());
+app.use(passport.session());
 
-/* ───── Helpers ───── */
+// ---------- Хелперы ----------
 function ensureAuthed(req, res, next) {
-  if (req.session?.tokens) {
-    oauth2Client.setCredentials(req.session.tokens);
-    return next();
-  }
-  if (req.path.startsWith("/videos") || req.path.startsWith("/stream/") || req.path.startsWith("/debug/")) {
-    return res.status(401).json({ error: "not_authenticated" });
-  }
-  return res.redirect("/auth/google");
+  if (req.isAuthenticated && req.isAuthenticated()) return next();
+  return res.status(401).json({ error: 'not_authenticated' });
 }
 
-async function getAccessToken() {
-  const { token } = await oauth2Client.getAccessToken(); // auto-refresh при необходимости
-  return token;
+function getToken(req) {
+  return req.user?.tokens?.access_token || null;
+}
+function getRefreshToken(req) {
+  return req.user?.tokens?.refresh_token || null;
+}
+function getExpiry(req) {
+  return req.user?.tokens?.expiresAt || 0;
 }
 
-async function callWithRetry(fn, attempts = 3) {
-  let lastErr;
-  for (let i = 1; i <= attempts; i++) {
-    try {
-      return await fn();
-    } catch (e) {
-      lastErr = e;
-      const s = e?.response?.status;
-      const retriable = !s || (s >= 500 && s < 600);
-      if (!retriable || i === attempts) throw e;
-      await new Promise((r) => setTimeout(r, 400 * i));
-    }
-  }
-  throw lastErr;
-}
+async function refreshAccessToken(req) {
+  const refreshToken = getRefreshToken(req);
+  if (!refreshToken) return false;
 
-/* ───── Auth routes ───── */
-app.get("/auth/google", (req, res) => {
-  const url = oauth2Client.generateAuthUrl({
-    access_type: "offline",
-    prompt: "consent",
-    scope: SCOPES,
+  const body = new URLSearchParams({
+    client_id: process.env.GOOGLE_CLIENT_ID,
+    client_secret: process.env.GOOGLE_CLIENT_SECRET,
+    grant_type: 'refresh_token',
+    refresh_token: refreshToken
   });
-  res.redirect(url);
-});
 
-app.get("/oauth2/callback", async (req, res) => {
-  try {
-    const { code } = req.query;
-    const { tokens } = await oauth2Client.getToken(code);
-    req.session.tokens = tokens;
-    oauth2Client.setCredentials(tokens);
-    res.redirect("/");
-  } catch (e) {
-    console.error("[OAUTH] error:", e?.response?.data || e);
-    res.status(500).send("OAuth error");
+  const resp = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body
+  });
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    console.error('refresh token failed:', resp.status, text);
+    return false;
   }
+
+  const data = await resp.json();
+  // { access_token, expires_in, scope, token_type }
+  req.user.tokens.access_token = data.access_token;
+  req.user.tokens.expiresAt = Date.now() + Number(data.expires_in) * 1000;
+
+  // Иногда Google возвращает scope строкой
+  if (data.scope) {
+    req.user.tokens.scopes = data.scope.split(' ');
+  }
+  return true;
+}
+
+async function ensureValidToken(req) {
+  const skew = 60 * 1000; // за минуту до истечения — обновим
+  if (!getToken(req)) return false;
+  if (Date.now() < getExpiry(req) - skew) return true;
+  return await refreshAccessToken(req);
+}
+
+async function gphotosFetch(req, endpoint, { method = 'GET', body } = {}) {
+  await ensureValidToken(req);
+  const token = getToken(req);
+
+  const url = endpoint.startsWith('http')
+    ? endpoint
+    : `https://photoslibrary.googleapis.com/v1/${endpoint}`;
+
+  const headers = {
+    Authorization: `Bearer ${token}`
+  };
+  if (body && typeof body === 'object' && method !== 'GET') {
+    headers['Content-Type'] = 'application/json';
+  }
+
+  const resp = await fetch(url, {
+    method,
+    headers,
+    body: body && typeof body === 'object' ? JSON.stringify(body) : body
+  });
+
+  return resp;
+}
+
+// ---------- Роуты авторизации ----------
+app.get('/auth/google', (req, res, next) => {
+  passport.authenticate('google', { scope: SCOPES })(req, res, next);
 });
 
-app.get("/logout", (req, res) => {
-  req.session.destroy(() => res.redirect("/"));
-});
+app.get(
+  '/auth/google/callback',
+  passport.authenticate('google', {
+    failureRedirect: '/?auth=failed'
+  }),
+  (req, res) => res.redirect('/')
+);
 
-/* ───── API: список видео ───── */
-app.get("/videos", ensureAuthed, async (req, res) => {
-  try {
-    const accessToken = await getAccessToken();
-
-    // 1) попытка через фильтр только видео
-    const searchResp = await callWithRetry(() =>
-      axios.post(
-        "https://photoslibrary.googleapis.com/v1/mediaItems:search",
-        { pageSize: 50, filters: { mediaTypeFilter: { mediaTypes: ["VIDEO"] } } },
-        { headers: { Authorization: `Bearer ${accessToken}` } }
-      )
-    ).catch((e) => e?.response || Promise.reject(e));
-
-    if (searchResp?.status === 200 && Array.isArray(searchResp.data?.mediaItems)) {
-      const items = searchResp.data.mediaItems.map((mi) => ({
-        id: mi.id,
-        filename: mi.filename,
-        mimeType: mi.mimeType,
-        productUrl: mi.productUrl,
-        baseUrl: mi.baseUrl,
-        creationTime: mi.mediaMetadata?.creationTime,
-      }));
-      return res.json({ items });
-    }
-
-    // 2) фолбэк — берём всё и фильтруем по mimeType
-    const listResp = await callWithRetry(() =>
-      axios.get("https://photoslibrary.googleapis.com/v1/mediaItems?pageSize=100", {
-        headers: { Authorization: `Bearer ${accessToken}` },
-      })
-    ).catch((e) => e?.response || Promise.reject(e));
-
-    if (listResp?.status === 200 && Array.isArray(listResp.data?.mediaItems)) {
-      const items = listResp.data.mediaItems
-        .filter((mi) => (mi.mimeType || "").toLowerCase().startsWith("video/"))
-        .map((mi) => ({
-          id: mi.id,
-          filename: mi.filename,
-          mimeType: mi.mimeType,
-          productUrl: mi.productUrl,
-          baseUrl: mi.baseUrl,
-          creationTime: mi.mediaMetadata?.creationTime,
-        }));
-      return res.json({ items });
-    }
-
-    return res.status(502).json({
-      error: "upstream_error",
-      searchStatus: searchResp?.status,
-      searchData: searchResp?.data,
-      listStatus: listResp?.status,
-      listData: listResp?.data,
+app.post('/logout', ensureAuthed, (req, res, next) => {
+  req.logout(err => {
+    if (err) return next(err);
+    req.session.destroy(() => {
+      res.clearCookie('gpp.sid');
+      res.status(204).end();
     });
+  });
+});
+
+// ---------- API ----------
+app.get('/api/me', ensureAuthed, async (req, res) => {
+  const info = {
+    displayName: req.user.displayName,
+    tokenExpiresAt: req.user.tokens.expiresAt,
+    scopes: req.user.tokens.scopes
+  };
+  res.json(info);
+});
+
+app.get('/api/videos', ensureAuthed, async (req, res) => {
+  try {
+    // 1) Поиск только видео
+    const searchResp = await gphotosFetch(req, 'mediaItems:search', {
+      method: 'POST',
+      body: {
+        pageSize: 50,
+        filters: {
+          mediaTypeFilter: { mediaTypes: ['VIDEO'] }
+        }
+      }
+    });
+
+    if (!searchResp.ok) {
+      const errText = await searchResp.text();
+      return res
+        .status(searchResp.status)
+        .json({ error: 'upstream_error', detail: errText });
+    }
+
+    const data = await searchResp.json();
+    const items = (data.mediaItems || []).map(m => ({
+      id: m.id,
+      filename: m.filename,
+      mimeType: m.mimeType,
+      baseUrl: m.baseUrl // для превью/иконки; поток — через /video/:id
+    }));
+
+    res.json({ items });
   } catch (e) {
-    const s = e?.response?.status;
-    res.status(500).json({ error: "Failed to list videos", status: s, data: e?.response?.data || null });
+    console.error(e);
+    res.status(500).json({ error: 'server_error' });
   }
 });
 
-/* ───── API: проксирование потока (Range) ───── */
-app.get("/stream/:id", ensureAuthed, async (req, res) => {
+// Проксирование видео потока (используем baseUrl=dv)
+app.get('/video/:id', ensureAuthed, async (req, res) => {
   try {
-    const id = req.params.id;
-    const accessToken = await getAccessToken();
-
-    // получаем baseUrl
-    const info = await callWithRetry(() =>
-      axios.get(`https://photoslibrary.googleapis.com/v1/mediaItems/${encodeURIComponent(id)}`, {
-        headers: { Authorization: `Bearer ${accessToken}` },
-      })
-    ).catch((e) => e?.response || Promise.reject(e));
-
-    if (info.status !== 200 || !info.data?.baseUrl) {
-      return res.status(404).send("MediaItem baseUrl not found");
+    const itemResp = await gphotosFetch(req, `mediaItems/${req.params.id}`);
+    if (!itemResp.ok) {
+      const t = await itemResp.text();
+      return res.status(itemResp.status).send(t);
+    }
+    const item = await itemResp.json();
+    if (!item.baseUrl) {
+      return res.status(404).json({ error: 'no_baseUrl' });
     }
 
-    const url = `${info.data.baseUrl}=dv`;
-    const range = req.headers.range;
-    const headers = {
-      Authorization: `Bearer ${accessToken}`,
-      ...(range ? { Range: range } : {}),
-      Connection: "keep-alive",
-    };
-
-    const upstream = await callWithRetry(() =>
-      axios({ url, method: "GET", headers, responseType: "stream", maxRedirects: 5, validateStatus: () => true })
-    );
+    // dv — "download video" поток
+    const vidUrl = `${item.baseUrl}=dv`;
+    const upstream = await gphotosFetch(req, vidUrl);
 
     res.status(upstream.status);
-    const h = upstream.headers;
-    if (h["content-type"]) res.setHeader("Content-Type", h["content-type"]);
-    if (h["content-length"]) res.setHeader("Content-Length", h["content-length"]);
-    if (h["accept-ranges"]) res.setHeader("Accept-Ranges", h["accept-ranges"]);
-    if (h["content-range"]) res.setHeader("Content-Range", h["content-range"]);
-    if (!h["cache-control"]) res.setHeader("Cache-Control", "private, max-age=0, no-store");
-
-    upstream.data.on("error", () => {
-      if (!res.headersSent) res.status(502);
-      res.end();
+    // прокидываем часть заголовков
+    upstream.headers.forEach((v, k) => {
+      if (!['transfer-encoding', 'content-encoding'].includes(k.toLowerCase())) {
+        res.setHeader(k, v);
+      }
     });
 
-    upstream.data.pipe(res);
+    if (upstream.body) upstream.body.pipe(res);
+    else res.end();
   } catch (e) {
-    console.error("[STREAM] error:", e?.response?.data || e);
-    res.status(500).send("Stream error");
+    console.error(e);
+    res.status(500).json({ error: 'proxy_failed' });
   }
 });
 
-/* ───── DEBUG (на время настройки) ───── */
-registerDebug(app, oauth2Client, ensureAuthed);
-
-/* ───── Login gate + static ───── */
-app.get("/", (req, res, next) => {
-  if (!req.session?.tokens) {
-    return res.send(`
-      <!doctype html><html><head><meta charset="utf-8">
-      <meta name="viewport" content="width=device-width,initial-scale=1">
-      <title>Google Photos Player</title>
-      <style>
-        body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;padding:3rem;max-width:720px;margin:auto}
-        h1{font-size:2.2rem;margin:.2rem 0 1rem}
-        p{opacity:.8}
-        a.btn{display:inline-block;padding:.9rem 1.2rem;border:1px solid #ddd;border-radius:12px;text-decoration:none}
-      </style>
-      </head><body>
-        <h1>Google Photos Player</h1>
-        <p>Войдите через Google, чтобы получить список ваших видео.</p>
-        <a class="btn" href="/auth/google">Войти с Google</a>
-      </body></html>
-    `);
-  }
-  next();
+// ---------- Debug ----------
+app.get('/debug/this-token', ensureAuthed, (req, res) => {
+  res.json({
+    tokenStartsWith: (req.user.tokens.access_token || '').slice(0, 12),
+    scopes: req.user.tokens.scopes,
+    expiry: req.user.tokens.expiresAt
+  });
 });
 
-app.use(express.static("public"));
+app.get('/debug/tokeninfo', ensureAuthed, async (req, res) => {
+  const t = getToken(req);
+  const r = await fetch(
+    `https://www.googleapis.com/oauth2/v3/tokeninfo?access_token=${encodeURIComponent(
+      t
+    )}`
+  );
+  res.status(r.status).send(await r.text());
+});
 
+app.get('/debug/videos', ensureAuthed, async (req, res) => {
+  const out = {};
+  try {
+    const s = await gphotosFetch(req, 'mediaItems:search', {
+      method: 'POST',
+      body: { pageSize: 1, filters: { mediaTypeFilter: { mediaTypes: ['VIDEO'] } } }
+    });
+    out.search = { status: s.status, data: s.ok ? await s.json() : await s.text() };
+
+    const l = await gphotosFetch(req, 'mediaItems?pageSize=1');
+    out.list = { status: l.status, data: l.ok ? await l.json() : await l.text() };
+  } catch (e) {
+    out.error = String(e);
+  }
+  res.json(out);
+});
+
+// ---------- Статика ----------
+const __dirname = path.dirname(new URL(import.meta.url).pathname);
+app.use(express.static(path.join(__dirname, 'public')));
+
+// Фолбэк на index (если нужен одностраничный интерфейс)
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+// ---------- Старт ----------
 app.listen(PORT, () => {
-  console.log(`Server listening on ${BASE_URL}`);
+  console.log(`Server on ${BASE_URL} (PORT=${PORT})`);
 });
