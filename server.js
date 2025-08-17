@@ -1,4 +1,5 @@
 // server.js
+// Node >= 18, package.json -> { "type": "module" }
 import express from "express";
 import session from "express-session";
 import axios from "axios";
@@ -7,13 +8,13 @@ import { google } from "googleapis";
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-/* -------------------- Base -------------------- */
-app.set("trust proxy", 1); // важно за прокси (Render) для корректных secure-кук
+/* ---------- Base ---------- */
+app.set("trust proxy", 1); // важнo для Render/прокси, чтобы secure cookie работала
 app.disable("x-powered-by");
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-/* -------------------- Sessions -------------------- */
+/* ---------- Sessions ---------- */
 app.use(
   session({
     name: "sid",
@@ -23,13 +24,13 @@ app.use(
     cookie: {
       httpOnly: true,
       sameSite: "lax",
-      secure: "auto",                  // https => secure; локально http — без secure
+      secure: "auto",                  // https -> secure; локально http — без secure
       maxAge: 1000 * 60 * 60 * 24 * 7, // 7 дней
     },
   })
 );
 
-/* -------------------- OAuth -------------------- */
+/* ---------- OAuth ---------- */
 const BASE_URL = (process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`).replace(/\/$/, "");
 const REDIRECT_URI = `${BASE_URL}/oauth2/callback`;
 
@@ -39,13 +40,13 @@ const oauth2Client = new google.auth.OAuth2(
   REDIRECT_URI
 );
 
-// Запросим оба скоупа — readonly и полный. В консоли GCP оба должны быть добавлены в Data Access.
+// Запрашиваем оба скоупа (оба должны быть добавлены в Google Auth Platform → Data access)
 const SCOPES = [
   "https://www.googleapis.com/auth/photoslibrary.readonly",
   "https://www.googleapis.com/auth/photoslibrary",
 ];
 
-/* -------------------- Helpers -------------------- */
+/* ---------- Helpers ---------- */
 function ensureAuthed(req, res, next) {
   if (req.session?.tokens) {
     oauth2Client.setCredentials(req.session.tokens);
@@ -62,11 +63,11 @@ function ensureAuthed(req, res, next) {
 }
 
 async function getAccessToken() {
-  const { token } = await oauth2Client.getAccessToken();
+  const { token } = await oauth2Client.getAccessToken(); // auto-refresh при необходимости
   return token;
 }
 
-// Универсальный ретрай для сетевых/5xx
+// простой ретрай для сетевых/5xx
 async function callWithRetry(fn, attempts = 3) {
   let lastErr;
   for (let i = 1; i <= attempts; i++) {
@@ -76,7 +77,6 @@ async function callWithRetry(fn, attempts = 3) {
       lastErr = e;
       const status = e?.response?.status;
       const retriable = !status || (status >= 500 && status < 600);
-      console.warn(`[RETRY] attempt ${i} failed`, status || e.message);
       if (!retriable || i === attempts) throw e;
       await new Promise((r) => setTimeout(r, 400 * i)); // backoff
     }
@@ -84,7 +84,7 @@ async function callWithRetry(fn, attempts = 3) {
   throw lastErr;
 }
 
-/* -------------------- OAuth routes -------------------- */
+/* ---------- OAuth routes ---------- */
 app.get("/auth/google", (req, res) => {
   const url = oauth2Client.generateAuthUrl({
     access_type: "offline",
@@ -100,11 +100,11 @@ app.get("/oauth2/callback", async (req, res) => {
     const { tokens } = await oauth2Client.getToken(code);
     req.session.tokens = tokens;
     oauth2Client.setCredentials(tokens);
-    console.log("[OAUTH] ok:", Object.keys(tokens), "sid:", req.sessionID);
+    console.log("[OAUTH] ok; sid:", req.sessionID, "scopes:", tokens.scope);
     res.redirect("/");
   } catch (e) {
     console.error("[OAUTH] error:", e?.response?.data || e);
-    res.status(500).send("OAuth error.");
+    res.status(500).send("OAuth error");
   }
 });
 
@@ -112,13 +112,12 @@ app.get("/logout", (req, res) => {
   req.session.destroy(() => res.redirect("/"));
 });
 
-/* -------------------- API: list videos -------------------- */
+/* ---------- API: list videos ---------- */
 app.get("/videos", ensureAuthed, async (req, res) => {
   try {
-    console.log("[VIDEOS] authed sid:", req.sessionID, "hasTokens:", !!req.session?.tokens);
     const accessToken = await getAccessToken();
 
-    // 1) Основной путь: POST /mediaItems:search c фильтром VIDEO
+    // 1) основной путь — фильтр по видео
     const searchResp = await callWithRetry(() =>
       axios.post(
         "https://photoslibrary.googleapis.com/v1/mediaItems:search",
@@ -139,8 +138,7 @@ app.get("/videos", ensureAuthed, async (req, res) => {
       return res.json({ items });
     }
 
-    // 2) Фолбэк: GET /mediaItems (без фильтра) + фильтруем видео на сервере
-    console.warn("[VIDEOS] fallback to GET /mediaItems due to status:", searchResp?.status);
+    // 2) фолбэк — получаем всё и фильтруем по mimeType
     const listResp = await callWithRetry(() =>
       axios.get("https://photoslibrary.googleapis.com/v1/mediaItems?pageSize=100", {
         headers: { Authorization: `Bearer ${accessToken}` },
@@ -161,13 +159,6 @@ app.get("/videos", ensureAuthed, async (req, res) => {
       return res.json({ items });
     }
 
-    console.error(
-      "[VIDEOS] google error (both paths):",
-      searchResp?.status,
-      searchResp?.data,
-      listResp?.status,
-      listResp?.data
-    );
     return res.status(502).json({
       error: "upstream_error",
       searchStatus: searchResp?.status,
@@ -178,19 +169,19 @@ app.get("/videos", ensureAuthed, async (req, res) => {
   } catch (e) {
     const status = e?.response?.status;
     const data = e?.response?.data;
-    console.error("[VIDEOS] error", status, data || e.message || e);
-    if (status && status !== 200) return res.status(502).json({ error: "upstream_error", status });
+    console.error("[/videos] error:", status, data || e);
+    if (status) return res.status(502).json({ error: "upstream_error", status, data });
     return res.status(500).json({ error: "Failed to list videos" });
   }
 });
 
-/* -------------------- API: proxy stream (Range) -------------------- */
+/* ---------- API: proxy stream (Range) ---------- */
 app.get("/stream/:id", ensureAuthed, async (req, res) => {
   const id = req.params.id;
   try {
     const accessToken = await getAccessToken();
 
-    // meta → baseUrl
+    // мета для получения baseUrl
     const info = await callWithRetry(() =>
       axios.get(`https://photoslibrary.googleapis.com/v1/mediaItems/${encodeURIComponent(id)}`, {
         headers: { Authorization: `Bearer ${accessToken}` },
@@ -198,11 +189,11 @@ app.get("/stream/:id", ensureAuthed, async (req, res) => {
     ).catch((e) => e?.response || Promise.reject(e));
 
     if (info.status !== 200 || !info.data?.baseUrl) {
-      console.error("[STREAM] get mediaItem error:", info.status, info.data);
+      console.error("[STREAM] mediaItem error:", info.status, info.data);
       return res.status(404).send("MediaItem baseUrl not found");
     }
 
-    const url = `${info.data.baseUrl}=dv`; // прямые байты видео
+    const url = `${info.data.baseUrl}=dv`; // прямой байтовый поток видео
     const range = req.headers.range;
     const headers = {
       Authorization: `Bearer ${accessToken}`,
@@ -237,38 +228,47 @@ app.get("/stream/:id", ensureAuthed, async (req, res) => {
 
     upstream.data.pipe(res);
   } catch (e) {
-    console.error("[STREAM] error", e?.response?.data || e);
+    console.error("[STREAM] error:", e?.response?.data || e);
     res.status(500).send("Stream error");
   }
 });
 
-/* -------------------- DEBUG endpoints -------------------- */
-// Текущий токен из credentials (быстрый взгляд)
+/* ---------- DEBUG (оставьте только на время настройки) ---------- */
+const mask = (v) => (typeof v === "string" ? v.slice(0, 12) + "…" : v);
+
 app.get("/debug/token", ensureAuthed, async (req, res) => {
   try {
-    const info = await oauth2Client.getTokenInfo(oauth2Client.credentials.access_token);
-    res.json({ scopes: info.scopes, expiry: oauth2Client.credentials.expiry_date });
+    const { token } = await oauth2Client.getAccessToken();
+    const info = await oauth2Client.getTokenInfo(token);
+    res.json({ tokenStartsWith: mask(token), scopes: info.scopes, expiry: oauth2Client.credentials.expiry_date || null });
   } catch (e) {
     res.status(500).json({ error: e?.response?.data || String(e) });
   }
 });
 
-// Именно тот access token, который уходит в /videos (через getAccessToken)
 app.get("/debug/this-token", ensureAuthed, async (req, res) => {
   try {
     const { token } = await oauth2Client.getAccessToken();
     const info = await oauth2Client.getTokenInfo(token);
-    res.json({
-      tokenStartsWith: token?.slice(0, 12),
-      scopes: info.scopes,
-      expiry: oauth2Client.credentials.expiry_date,
-    });
+    res.json({ tokenStartsWith: mask(token), scopes: info.scopes, expiry: oauth2Client.credentials.expiry_date || null });
   } catch (e) {
     res.status(500).json({ error: e?.response?.data || String(e) });
   }
 });
 
-// Сырые ответы Google для диагностики
+app.get("/debug/tokeninfo", ensureAuthed, async (req, res) => {
+  try {
+    const { token } = await oauth2Client.getAccessToken();
+    const r = await axios.get("https://oauth2.googleapis.com/tokeninfo", {
+      params: { access_token: token },
+      validateStatus: () => true,
+    });
+    res.status(r.status).json(r.data); // aud/azp/scope/expires_in …
+  } catch (e) {
+    res.status(500).json({ error: e?.response?.data || String(e) });
+  }
+});
+
 app.get("/debug/videos", ensureAuthed, async (req, res) => {
   try {
     const { token } = await oauth2Client.getAccessToken();
@@ -293,7 +293,20 @@ app.get("/debug/videos", ensureAuthed, async (req, res) => {
   }
 });
 
-/* -------------------- Login gate + static -------------------- */
+app.get("/debug/session", ensureAuthed, (req, res) => {
+  const t = req.session?.tokens || {};
+  res.json({
+    hasTokens: !!req.session?.tokens,
+    keys: Object.keys(t),
+    access_token: mask(t.access_token || ""),
+    refresh_token: mask(t.refresh_token || ""),
+    scopeRaw: t.scope || null,
+    expiry_date: t.expiry_date || null,
+    sid: req.sessionID,
+  });
+});
+
+/* ---------- Login gate + static ---------- */
 app.get("/", (req, res, next) => {
   if (!req.session?.tokens) {
     return res.send(`
