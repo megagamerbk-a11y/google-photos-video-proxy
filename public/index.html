@@ -6,53 +6,26 @@
     name="viewport"
     content="width=device-width,initial-scale=1,maximum-scale=1"
   />
-  <title>Google Photos Player</title>
-  <style>
-    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; background:#0b0b0b; color:#eee; }
-    header { display:flex; gap:12px; align-items:center; padding:14px 16px; background:#141414; position:sticky; top:0; }
-    h1 { font-size:18px; font-weight:600; margin:0; flex:1; }
-    button {
-      background:#2b2b2b; border:1px solid #3a3a3a; color:#eaeaea;
-      border-radius:8px; padding:9px 14px; cursor:pointer;
-    }
-    button:hover { background:#343434; }
-    .wrap { padding:16px; }
-    .grid {
-      display:grid; grid-template-columns: 280px 1fr; gap:16px; align-items:start;
-    }
-    .panel {
-      background:#131313; border:1px solid #262626; border-radius:12px; overflow:auto;
-      max-height: calc(100dvh - 160px);
-    }
-    ul { margin:0; padding:0; list-style:none; }
-    li {
-      border-bottom:1px solid #1f1f1f; padding:10px 12px; font-size:14px; cursor:pointer;
-    }
-    li:hover { background:#1a1a1a; }
-    video { width:100%; height:auto; display:block; background:#000; border-radius:12px; }
-    .empty { padding:14px; color:#aaa; font-size:14px; }
-  </style>
+  <title>Player Proxy</title>
+  <link rel="stylesheet" href="/proxy.css" />
 </head>
-<body>
-  <header>
-    <h1>Google Photos Player</h1>
-    <button id="btn-refresh" disabled>Обновить список</button>
-    <button id="btn-auth">Войти</button>
-  </header>
-
-  <div class="wrap">
-    <div class="grid">
-      <div class="panel">
-        <ul id="list"></ul>
-        <div id="empty-list" class="empty" hidden>Список пуст</div>
-      </div>
-
-      <div>
-        <video id="player" controls></video>
-      </div>
-    </div>
+<body class="landing">
+  <div class="landing-card">
+    <h1>Player Proxy</h1>
+    <form id="go" action="/load" method="get">
+      <input
+        type="url"
+        name="url"
+        placeholder="Вставьте адрес страницы (http/https)"
+        required
+        autofocus
+      />
+      <button type="submit">Перейти</button>
+    </form>
+    <p class="hint">
+      Демо-прокладка: скачивает HTML сервера, вклеивает панель и пытается
+      заменить HTML5-видеоплееры на странице. Работает не со всеми сайтами.
+    </p>
   </div>
-
-  <script src="/main.js"></script>
 </body>
 </html>
