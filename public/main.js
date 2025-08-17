@@ -1,101 +1,99 @@
-async function getJSON(url) {
-  const r = await fetch(url, { credentials: 'same-origin' });
-  if (!r.ok) throw new Error(`${r.status}`);
+/* global window, document, fetch, alert */
+
+const els = {
+  login: document.getElementById("loginBtn"),
+  logout: document.getElementById("logoutBtn"),
+  refresh: document.getElementById("refreshBtn"),
+  list: document.getElementById("list"),
+  empty: document.getElementById("empty"),
+  video: document.getElementById("video"),
+};
+
+function setAuthUI(authed) {
+  els.login.style.display = authed ? "none" : "inline-block";
+  els.logout.style.display = authed ? "inline-block" : "none";
+  els.refresh.disabled = !authed;
+}
+
+async function getMe() {
+  const r = await fetch("/api/me");
+  if (!r.ok) return { authed: false };
   return r.json();
 }
 
-const authBtn = document.getElementById('authBtn');
-const refreshBtn = document.getElementById('refresh');
-const hello = document.getElementById('hello');
-const player = document.getElementById('player');
-const list = document.getElementById('list');
-const emptyLabel = document.getElementById('empty');
-
-let AUTH = { authenticated: false, user: null };
-
-async function updateAuthUI() {
+async function loadVideos() {
+  els.list.innerHTML = "";
+  els.empty.style.display = "none";
   try {
-    AUTH = await getJSON('/auth/status');
-  } catch {
-    AUTH = { authenticated: false, user: null };
-  }
+    const r = await fetch("/api/videos");
+    const data = await r.json();
 
-  if (AUTH.authenticated) {
-    authBtn.textContent = 'Выйти';
-    hello.textContent = AUTH.user?.email ? `Вошли как ${AUTH.user.email}` : '';
-  } else {
-    authBtn.textContent = 'Войти';
-    hello.textContent = '';
-  }
-}
-
-authBtn.addEventListener('click', () => {
-  if (AUTH.authenticated) {
-    window.location.href = '/auth/logout';
-  } else {
-    window.location.href = '/auth/google';
-  }
-});
-
-refreshBtn.addEventListener('click', async () => {
-  try {
-    const data = await getJSON('/api/videos');
-    renderList(data.items || []);
-  } catch (e) {
-    if (e.message === '401') {
-      alert('Нужно войти в Google. Нажмите «Войти».');
-    } else if (e.message === '403') {
-      alert('Недостаточно прав (PERMISSION_DENIED). Проверьте, что на выдаче разрешен доступ к Google Photos.');
-    } else {
-      alert('Не удалось загрузить список видео.');
+    if (!r.ok) {
+      const detail =
+        data?.listData?.error?.message || data?.message || r.statusText;
+      alert(
+        `Не удалось загрузить список видео.\n${
+          detail || "Попробуйте выполнить вход ещё раз."
+        }`
+      );
+      return;
     }
-  }
-});
 
-function renderList(items) {
-  list.innerHTML = '';
-  if (!items.length) {
-    emptyLabel.style.display = 'block';
-    return;
-  }
-  emptyLabel.style.display = 'none';
+    const videos = data?.videos || [];
+    if (!videos.length) {
+      els.empty.style.display = "block";
+      return;
+    }
 
-  items.forEach((it) => {
-    const card = document.createElement('div');
-    card.className = 'card';
-    card.innerHTML = `
-      <div class="mono">${escapeHTML(it.filename || it.id)}</div>
-      <div class="muted" style="margin-top:6px">${escapeHTML(it.mimeType || '')}</div>
-    `;
-    card.addEventListener('click', () => {
-      player.pause();
-      player.querySelector('source').src = it.playerSrc;
-      player.load();
-      player.play().catch(() => {});
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-    });
-    list.appendChild(card);
+    for (const v of videos) {
+      const el = document.createElement("div");
+      el.className = "item";
+      el.title = v.filename || v.mimeType;
+
+      el.innerHTML = `
+        <div style="width:36px;height:36px;display:flex;align-items:center;justify-content:center;background:#0b0e14;border-radius:8px;border:1px solid #2b3240">🎬</div>
+        <div style="flex:1;min-width:0">
+          <div class="name">${(v.filename || "").replace(/</g, "&lt;")}</div>
+          <div class="muted">${v.mimeType || ""}</div>
+        </div>
+      `;
+
+      el.addEventListener("click", () => {
+        // Для видео Google Photos: baseUrl + '=dv'
+        const src = `${v.baseUrl}=dv`;
+        els.video.src = src;
+        els.video.play().catch(() => {});
+        // небольшая прокрутка к плееру
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      });
+
+      els.list.appendChild(el);
+    }
+  } catch (e) {
+    alert("Ошибка сети при загрузке списка.");
+  }
+}
+
+async function init() {
+  const me = await getMe();
+  setAuthUI(me.authed);
+
+  els.login.addEventListener("click", () => {
+    window.location.href = "/auth/google";
   });
-}
 
-function escapeHTML(s) {
-  return (s || '').replace(/[&<>"']/g, (ch) => ({
-    '&': '&amp;',
-    '<': '&lt;',
-    '>': '&gt;',
-    '"': '&quot;',
-    "'": '&#039;'
-  }[ch]));
-}
-
-// Старт
-(async function init() {
-  await updateAuthUI();
-  // Если уже вошли — сразу подтянем список
-  if (AUTH.authenticated) {
+  els.logout.addEventListener("click", async () => {
     try {
-      const data = await getJSON('/api/videos');
-      renderList(data.items || []);
-    } catch (_) {}
+      await fetch("/api/logout");
+    } catch {}
+    window.location.reload();
+  });
+
+  els.refresh.addEventListener("click", loadVideos);
+
+  if (me.authed) {
+    loadVideos();
   }
-})();
+}
+
+init();
