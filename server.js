@@ -1,3 +1,4 @@
+// server.js
 import express from "express";
 import session from "express-session";
 import axios from "axios";
@@ -6,33 +7,32 @@ import { google } from "googleapis";
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// 1) ВАЖНО для Render/прокси: чтобы secure-кука ставилась корректно
-app.set("trust proxy", 1);
-
+// -------- Base setup
+app.set("trust proxy", 1); // важно на Render/за прокси
 app.disable("x-powered-by");
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Сессии
+// -------- Sessions
 app.use(
   session({
+    name: "sid",
     secret: process.env.SESSION_SECRET || "dev-secret-change-me",
     resave: false,
     saveUninitialized: false,
     cookie: {
       httpOnly: true,
       sameSite: "lax",
-      secure: !!process.env.RENDER, // на Render=true
-      maxAge: 1000 * 60 * 60 * 24 * 7, // 7 дней
-    },
+      secure: "auto",            // https => secure, http (локально) => нет
+      maxAge: 1000 * 60 * 60 * 24 * 7 // 7 дней
+    }
   })
 );
 
-// Базовый URL и redirect_uri
+// -------- OAuth setup
 const BASE_URL = (process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`).replace(/\/$/, "");
 const REDIRECT_URI = `${BASE_URL}/oauth2/callback`;
 
-// OAuth
 const oauth2Client = new google.auth.OAuth2(
   process.env.GOOGLE_CLIENT_ID,
   process.env.GOOGLE_CLIENT_SECRET,
@@ -40,25 +40,25 @@ const oauth2Client = new google.auth.OAuth2(
 );
 const SCOPE = ["https://www.googleapis.com/auth/photoslibrary.readonly"];
 
-// Хелпер
+// -------- Helpers
 function ensureAuthed(req, res, next) {
   if (req.session?.tokens) {
     oauth2Client.setCredentials(req.session.tokens);
     return next();
   }
-  // 2) Для API лучше вернуть 401, а не редиректить в fetch (чтобы не было "Failed to fetch")
+  // для API возвращаем 401, чтобы не было "Failed to fetch"
   if (req.path.startsWith("/videos") || req.path.startsWith("/stream/")) {
     return res.status(401).json({ error: "not_authenticated" });
   }
   return res.redirect("/auth/google");
 }
 
-// ===== OAuth =====
+// -------- OAuth routes
 app.get("/auth/google", (req, res) => {
   const url = oauth2Client.generateAuthUrl({
     access_type: "offline",
     prompt: "consent",
-    scope: SCOPE,
+    scope: SCOPE
   });
   res.redirect(url);
 });
@@ -69,12 +69,11 @@ app.get("/oauth2/callback", async (req, res) => {
     const { tokens } = await oauth2Client.getToken(code);
     req.session.tokens = tokens;
     oauth2Client.setCredentials(tokens);
-    // Лог в Render для отладки
-    console.log("OAuth OK. Have tokens:", Object.keys(tokens));
+    console.log("[OAUTH] ok:", Object.keys(tokens), "sid:", req.sessionID);
     res.redirect("/");
   } catch (e) {
-    console.error("OAuth callback error:", e?.response?.data || e);
-    res.status(500).send("OAuth error. Check server logs.");
+    console.error("[OAUTH] error:", e?.response?.data || e);
+    res.status(500).send("OAuth error.");
   }
 });
 
@@ -82,31 +81,33 @@ app.get("/logout", (req, res) => {
   req.session.destroy(() => res.redirect("/"));
 });
 
-// ===== API =====
+// -------- API: list videos
 app.get("/videos", ensureAuthed, async (req, res) => {
   try {
+    console.log("[VIDEOS] authed sid:", req.sessionID, "hasTokens:", !!req.session?.tokens);
     const photos = google.photoslibrary({ version: "v1", auth: oauth2Client });
     const { data } = await photos.mediaItems.search({
       requestBody: {
         pageSize: 50,
-        filters: { mediaTypeFilter: { mediaTypes: ["VIDEO"] } },
-      },
+        filters: { mediaTypeFilter: { mediaTypes: ["VIDEO"] } }
+      }
     });
-    const items = (data.mediaItems || []).map((mi) => ({
+    const items = (data.mediaItems || []).map(mi => ({
       id: mi.id,
       filename: mi.filename,
       mimeType: mi.mimeType,
       productUrl: mi.productUrl,
       baseUrl: mi.baseUrl,
-      creationTime: mi.mediaMetadata?.creationTime,
+      creationTime: mi.mediaMetadata?.creationTime
     }));
     res.json({ items });
   } catch (e) {
-    console.error("videos error", e?.response?.data || e);
+    console.error("[VIDEOS] error", e?.response?.data || e);
     res.status(500).json({ error: "Failed to list videos" });
   }
 });
 
+// -------- API: proxy stream (supports Range)
 app.get("/stream/:id", ensureAuthed, async (req, res) => {
   const id = req.params.id;
   try {
@@ -114,12 +115,12 @@ app.get("/stream/:id", ensureAuthed, async (req, res) => {
     const { data } = await photos.mediaItems.get({ mediaItemId: id });
     if (!data?.baseUrl) return res.status(404).send("MediaItem baseUrl not found");
 
-    const url = `${data.baseUrl}=dv`;
+    const url = `${data.baseUrl}=dv`; // video bytes
     const range = req.headers.range;
     const headers = {
       Authorization: `Bearer ${oauth2Client.credentials.access_token}`,
       ...(range ? { Range: range } : {}),
-      Connection: "keep-alive",
+      Connection: "keep-alive"
     };
 
     const upstream = await axios({
@@ -128,7 +129,7 @@ app.get("/stream/:id", ensureAuthed, async (req, res) => {
       headers,
       responseType: "stream",
       maxRedirects: 5,
-      validateStatus: () => true,
+      validateStatus: () => true
     });
 
     res.status(upstream.status);
@@ -140,19 +141,19 @@ app.get("/stream/:id", ensureAuthed, async (req, res) => {
     if (!h["cache-control"]) res.setHeader("Cache-Control", "private, max-age=0, no-store");
 
     upstream.data.on("error", (err) => {
-      console.error("Upstream stream error:", err);
+      console.error("[STREAM] upstream error:", err);
       if (!res.headersSent) res.status(502);
       res.end();
     });
 
     upstream.data.pipe(res);
   } catch (e) {
-    console.error("stream error", e?.response?.data || e);
+    console.error("[STREAM] error", e?.response?.data || e);
     res.status(500).send("Stream error");
   }
 });
 
-// ===== Гейт перед отдачей статики =====
+// -------- Gate before static: show login page if not authed
 app.get("/", (req, res, next) => {
   if (!req.session?.tokens) {
     return res.send(`
@@ -160,8 +161,10 @@ app.get("/", (req, res, next) => {
       <meta name="viewport" content="width=device-width,initial-scale=1">
       <title>Google Photos Player</title>
       <style>
-        body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;padding:2rem;}
-        .btn{display:inline-block;padding:.8rem 1.2rem;border:1px solid #ddd;border-radius:10px;text-decoration:none}
+        body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;padding:3rem;max-width:720px;margin:auto}
+        h1{font-size:2.2rem;margin:.2rem 0 1rem}
+        p{opacity:.8}
+        a.btn{display:inline-block;padding:.9rem 1.2rem;border:1px solid #ddd;border-radius:12px;text-decoration:none}
       </style>
       </head><body>
         <h1>Google Photos Player</h1>
@@ -173,7 +176,7 @@ app.get("/", (req, res, next) => {
   next();
 });
 
-// Отдаём статику ТОЛЬКО после авторизации
+// -------- Static UI (доступно только после авторизации)
 app.use(express.static("public"));
 
 app.listen(PORT, () => {
