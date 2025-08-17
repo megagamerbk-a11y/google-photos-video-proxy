@@ -1,110 +1,80 @@
 (() => {
-  // --- панель навигации уже в HTML, тут лишь удобства ---
+  // верхняя панель: просто валидируем поле
   try {
-    const form = document.getElementById("proxyform");
-    const input = document.getElementById("proxyurl");
-    if (form && input) {
-      form.addEventListener("submit", (e) => {
-        if (!input.value) e.preventDefault();
-      });
-    }
+    const f = document.getElementById("proxyform");
+    const i = document.getElementById("proxyurl");
+    if (f && i) f.addEventListener("submit", (e) => { if (!i.value) e.preventDefault(); });
   } catch {}
 
-  // --- Переписываем fetch/XHR, чтобы относительные пути слались на исходный домен ---
+  // Патч fetch/XHR для относительных путей (SPA)
   try {
     const BASE = window.__PROXY_ORIGIN__ || location.origin;
-
     const origFetch = window.fetch;
     window.fetch = function (input, init) {
       try {
-        if (typeof input === "string" && input.startsWith("/")) {
-          input = BASE + input;
-        } else if (input instanceof Request && input.url.startsWith("/")) {
+        if (typeof input === "string" && input.startsWith("/")) input = BASE + input;
+        else if (input instanceof Request && input.url.startsWith("/"))
           input = new Request(BASE + input.url, input);
-        }
       } catch {}
       return origFetch(input, init);
     };
-
     const origOpen = XMLHttpRequest.prototype.open;
-    XMLHttpRequest.prototype.open = function (method, url, ...rest) {
-      try {
-        if (typeof url === "string" && url.startsWith("/")) {
-          url = BASE + url;
-        }
-      } catch {}
-      return origOpen.call(this, method, url, ...rest);
+    XMLHttpRequest.prototype.open = function (m, url, ...r) {
+      try { if (typeof url === "string" && url.startsWith("/")) url = (window.__PROXY_ORIGIN__ || "") + url; } catch {}
+      return origOpen.call(this, m, url, ...r);
     };
   } catch {}
 
-  // --- Замена HTML5 видеоплееров ---
+  const toAsset = (src) =>
+    `/asset?u=${encodeURIComponent(src)}&ref=${encodeURIComponent(window.__PROXY_ORIGIN__ || location.origin)}`;
+
+  function findSrc(v) {
+    return v.currentSrc || v.src || (v.querySelector("source[src]") || {}).src || "";
+  }
+
   function replaceVideos(root = document) {
-    const vids = new Set(root.querySelectorAll("video"));
-
-    // иногда источник лежит в <source>
-    function findSrc(v) {
-      if (v.currentSrc) return v.currentSrc;
-      if (v.src) return v.src;
-      const s = v.querySelector("source[src]"); if (s) return s.src;
-      return "";
-    }
-
+    const vids = root.querySelectorAll("video");
     vids.forEach((v) => {
-      if (v.closest("#proxybar")) return; // не трогаем нашу панель
+      if (v.closest("#proxybar")) return;
       if (v.dataset.__proxied === "1") return;
 
       const src = findSrc(v);
-      if (!src) return; // без явного src не трогаем (часто скрипты сами присваивают позже)
+      if (!src) return;
 
       v.dataset.__proxied = "1";
-      const wrapper = document.createElement("div");
-      wrapper.className = "proxy-player";
+      const wrap = document.createElement("div");
+      wrap.className = "proxy-player";
 
       const nv = document.createElement("video");
-      nv.controls = true;
-      nv.playsInline = true;
-      nv.style.maxWidth = "100%";
+      nv.controls = true; nv.playsInline = true; nv.style.maxWidth = "100%";
 
-      // поддержка .m3u8 через hls.js
-      if (/\.m3u8(\?|#|$)/i.test(src) && window.Hls && window.Hls.isSupported()) {
-        try {
-          const hls = new window.Hls();
-          hls.loadSource(src);
-          hls.attachMedia(nv);
-        } catch {
-          nv.src = src;
-        }
+      const abs = (s) => {
+        try { return new URL(s, window.__PROXY_URL__ || location.href).toString(); }
+        catch { return s; }
+      };
+      const real = abs(src);
+
+      // .m3u8 проксируем и переписываем
+      if (/\.m3u8(\?|#|$)/i.test(real) && window.Hls && window.Hls.isSupported()) {
+        const hls = new window.Hls();
+        hls.loadSource(toAsset(real));
+        hls.attachMedia(nv);
       } else {
-        nv.src = src;
+        // mp4/ts/webm тоже через /asset — чтобы всегда был правильный Referer
+        nv.src = toAsset(real);
       }
 
-      try {
-        // Сохраняем размеры как у оригинала (если были)
-        const w = v.getAttribute("width");
-        const h = v.getAttribute("height");
-        if (w) nv.setAttribute("width", w);
-        if (h) nv.setAttribute("height", h);
-      } catch {}
-
-      v.replaceWith(wrapper);
-      wrapper.appendChild(nv);
+      v.replaceWith(wrap);
+      wrap.appendChild(nv);
     });
   }
 
-  // Первая подмена
+  // старт и слежение
   try { replaceVideos(document); } catch {}
-
-  // Наблюдаем за динамическими изменениями (SPA)
   try {
-    const mo = new MutationObserver((muts) => {
-      for (const m of muts) {
-        if (m.addedNodes) {
-          m.addedNodes.forEach((n) => {
-            if (n.nodeType === 1) replaceVideos(n);
-          });
-        }
-      }
-    });
+    const mo = new MutationObserver((muts) => muts.forEach((m) =>
+      m.addedNodes && m.addedNodes.forEach((n) => n.nodeType === 1 && replaceVideos(n))
+    ));
     mo.observe(document.documentElement, { childList: true, subtree: true });
   } catch {}
 })();
