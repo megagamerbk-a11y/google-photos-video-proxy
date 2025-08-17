@@ -5,10 +5,9 @@ const path = require("path");
 
 const app = express();
 app.set("trust proxy", 1);
-
 app.use(express.static(path.join(__dirname, "public")));
 
-function isHttpUrl(u) {
+function isHttp(u) {
   try {
     const x = new URL(u);
     return x.protocol === "http:" || x.protocol === "https:";
@@ -17,125 +16,153 @@ function isHttpUrl(u) {
   }
 }
 
-// Главная с формой
-app.get("/", (_req, res) => {
-  res.sendFile(path.join(__dirname, "public", "index.html"));
-});
+const UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36";
 
-// Загрузка произвольной страницы и инъекция панели/скриптов
+app.get("/", (_req, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
+
+/**
+ * Прокси страницы: подтягиваем HTML, вклеиваем панель и наш скрипт
+ */
 app.get("/load", async (req, res) => {
   const target = (req.query.url || "").trim();
-
-  if (!isHttpUrl(target)) {
-    return res
-      .status(400)
-      .send(
-        "<h3>Нужно указать корректный http/https адрес в параметре <code>?url=</code>.</h3>"
-      );
-  }
-
-  const t = new URL(target);
+  if (!isHttp(target)) return res.status(400).send("Bad url");
 
   try {
     const upstream = await axios.get(target, {
       responseType: "text",
-      // немного прикидываемся браузером
-      headers: {
-        "user-agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
-        accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-      },
-      timeout: 15000,
+      headers: { "user-agent": UA, accept: "text/html,*/*;q=0.8" },
+      timeout: 20000,
       validateStatus: () => true
     });
 
     let html = upstream.data || "";
+    const t = new URL(target);
 
-    // Если пришло не HTML — отдадим как есть
-    const ctype = String(upstream.headers["content-type"] || "");
-    if (!ctype.includes("text/html")) {
-      res.set("Content-Type", ctype || "text/plain; charset=utf-8");
-      return res.send(html);
-    }
-
-    // Вставим <base> чтобы относительные ссылки/ресурсы резолвились на оригинальный сайт
-    const baseTag = `<base href="${t.origin}/">`;
-
-    // Наши стили/скрипты + hls.js + прокинем оригинальный origin/url внутрь страницы
+    // Вставим base + наши скрипты/стили
     const injectHead = `
-      ${baseTag}
+      <base href="${t.origin}/">
       <link rel="stylesheet" href="/proxy.css">
-      <script>window.__PROXY_ORIGIN__=${JSON.stringify(
-        t.origin
-      )};window.__PROXY_URL__=${JSON.stringify(target)};</script>
+      <script>window.__PROXY_ORIGIN__=${JSON.stringify(t.origin)};window.__PROXY_URL__=${JSON.stringify(
+      target
+    )};</script>
       <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.14/dist/hls.min.js" defer></script>
       <script src="/inject.js" defer></script>
     `;
+    const headPos = html.search(/<\/head>/i);
+    html =
+      headPos === -1 ? `<head>${injectHead}</head>${html}` : html.slice(0, headPos) + injectHead + html.slice(headPos);
 
-    // Панель сверху (внутрь <body>)
-    const proxyBar = `
+    // Панель навигации
+    const bar = `
       <div id="proxybar">
         <form id="proxyform" action="/load" method="get">
-          <input type="url" name="url" id="proxyurl" placeholder="Вставьте адрес страницы" value="${escapeHtml(
-            target
-          )}" />
+          <input id="proxyurl" name="url" type="url" value="${escapeHtml(target)}" />
           <button type="submit">Перейти</button>
-          <a href="/" id="proxyhome" title="На главную">✕</a>
+          <a id="proxyhome" href="/">✕</a>
         </form>
       </div>
     `;
-
-    // Вклеиваем в <head>
-    const headIdx = html.search(/<\/head>/i);
-    if (headIdx !== -1) {
-      html = html.slice(0, headIdx) + injectHead + html.slice(headIdx);
+    const bodyOpen = html.search(/<body[^>]*>/i);
+    if (bodyOpen !== -1) {
+      const after = html.indexOf(">", bodyOpen);
+      html = html.slice(0, after + 1) + bar + html.slice(after + 1);
     } else {
-      html = `<head>${injectHead}</head>${html}`;
+      html = bar + html;
     }
 
-    // Вклеиваем панель в начало <body>
-    const bodyOpenIdx = html.search(/<body[^>]*>/i);
-    if (bodyOpenIdx !== -1) {
-      const after = html.indexOf(">", bodyOpenIdx);
-      html = html.slice(0, after + 1) + proxyBar + html.slice(after + 1);
-    } else {
-      html = proxyBar + html;
-    }
-
-    // Мы отдаем страницу со СВОЕГО домена => снимем большинство CSP (для PoC)
+    // Снимаем строгий CSP (PoC)
     res.set(
       "Content-Security-Policy",
       "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:; img-src * data: blob:; media-src * data: blob:; style-src * 'unsafe-inline' *; script-src * 'unsafe-inline' 'unsafe-eval' * blob: data:; connect-src * data: blob:;"
     );
-
-    res.set("X-Content-Type-Options", "nosniff");
-    res.set("Referrer-Policy", "no-referrer-when-downgrade");
-    res.set("Cross-Origin-Opener-Policy", "unsafe-none"); // ради совместимости
-    res.set("Cross-Origin-Embedder-Policy", "unsafe-none");
-
     res.type("html").send(html);
   } catch (e) {
-    console.error("Proxy load error:", e.message);
-    res
-      .status(502)
-      .send(
-        `<h3>Не удалось загрузить страницу.</h3><pre>${escapeHtml(
-          e.message
-        )}</pre>`
-      );
+    console.error(e.message);
+    res.status(502).send("Upstream error");
   }
 });
 
-// хелпер для экранирования текста в HTML
+/**
+ * Прокси ресурсов/медиа.
+ * /asset?u=<absolute-url>&ref=<referer>
+ * - передаём Referer и UA;
+ * - поддерживаем Range для видео;
+ * - для .m3u8 переписываем урлы сегментов на наш /asset.
+ */
+app.get("/asset", async (req, res) => {
+  const u = req.query.u;
+  const ref = req.query.ref;
+  if (!isHttp(u)) return res.status(400).send("Bad u");
+
+  const urlObj = new URL(u);
+  const headers = {
+    "user-agent": UA,
+    referer: ref || urlObj.origin,
+    origin: urlObj.origin
+  };
+
+  // Проброс Range (нужно для mp4/ts)
+  if (req.headers.range) headers.range = req.headers.range;
+
+  try {
+    if (u.toLowerCase().includes(".m3u8")) {
+      // m3u8 переписываем
+      const r = await axios.get(u, {
+        responseType: "text",
+        headers,
+        timeout: 20000,
+        validateStatus: () => true
+      });
+
+      if (r.status >= 400) {
+        res.status(r.status).send(r.statusText || "Error");
+        return;
+      }
+
+      const base = new URL(u);
+      const toAbs = (line) => new URL(line, base).toString();
+      const prox = (line) =>
+        `/asset?u=${encodeURIComponent(toAbs(line))}&ref=${encodeURIComponent(ref || base.origin)}`;
+
+      const out = String(r.data || "")
+        .split(/\r?\n/)
+        .map((ln) => {
+          const s = ln.trim();
+          if (!s || s.startsWith("#")) return ln;
+          return prox(s);
+        })
+        .join("\n");
+
+      res.set("Content-Type", "application/vnd.apple.mpegurl; charset=utf-8");
+      return res.send(out);
+    }
+
+    // потоковое проксирование любого другого ресурса
+    const r = await axios.get(u, {
+      responseType: "stream",
+      headers,
+      timeout: 20000,
+      decompress: false,
+      validateStatus: () => true
+    });
+
+    res.status(r.status);
+    // Пробрасываем важные заголовки
+    for (const [k, v] of Object.entries(r.headers)) {
+      if (["transfer-encoding", "content-encoding"].includes(k)) continue;
+      res.set(k, v);
+    }
+    r.data.pipe(res);
+  } catch (e) {
+    console.error("asset:", e.message);
+    res.status(502).send("asset error");
+  }
+});
+
 function escapeHtml(s) {
-  return String(s)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;");
+  return String(s).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
 }
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () =>
-  console.log(`Proxy listening on http://localhost:${PORT}`)
-);
+app.listen(PORT, () => console.log("Proxy on http://localhost:" + PORT));
