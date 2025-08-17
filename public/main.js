@@ -1,61 +1,55 @@
-const loginBtn = document.getElementById('login');
-const logoutBtn = document.getElementById('logout');
-const refreshBtn = document.getElementById('refresh');
-const listBox = document.getElementById('list');
-const player = document.getElementById('player');
-
-async function pingAuth() {
-  const r = await fetch('/debug/token');
-  const j = await r.json();
-  const authed = !j.error;
-  loginBtn.classList.toggle('hidden', authed);
-  logoutBtn.classList.toggle('hidden', !authed);
-  refreshBtn.classList.toggle('hidden', !authed);
-  return authed;
-}
-
-loginBtn.onclick = () => location.href = '/auth/google';
-logoutBtn.onclick = async () => {
-  await fetch('/logout', { method: 'POST' });
-  location.reload();
-};
-refreshBtn.onclick = () => loadVideos(true);
-
-async function loadVideos(alertErrors=false) {
-  listBox.innerHTML = '';
+// public/main.js
+async function getMe() {
   try {
-    const r = await fetch('/api/videos');
-    const j = await r.json();
-    if (j.error) throw j;
-    if (!j.items?.length) {
-      listBox.innerHTML = '<div>Видео не найдены. Нажмите «Обновить список», либо проверьте, что в Google Photos есть видео.</div>';
-      return;
-    }
-    for (const v of j.items) {
-      const div = document.createElement('div');
-      div.className = 'item';
-      div.innerHTML = `
-        <div style="font-size:13px;opacity:.8">${v.filename || v.id}</div>
-        <button data-id="${v.id}">▶️ Проиграть</button>
-      `;
-      listBox.appendChild(div);
-    }
-  } catch (e) {
-    console.error(e);
-    if (alertErrors) alert('Не удалось загрузить список видео: ' + JSON.stringify(e));
+    const r = await fetch('/api/me', { credentials: 'same-origin' });
+    return await r.json();
+  } catch {
+    return { loggedIn: false };
   }
 }
 
-listBox.addEventListener('click', (e) => {
-  const btn = e.target.closest('button[data-id]');
-  if (!btn) return;
-  const id = btn.getAttribute('data-id');
-  // Проигрываем через наш прокси (получаем видеопоток)
-  player.src = `/api/stream/${encodeURIComponent(id)}`;
-  player.play().catch(()=>{});
-});
+async function updateAuthUI() {
+  const me = await getMe();
+  const loginBtn = document.getElementById('loginBtn');
+  const logoutBtn = document.getElementById('logoutBtn');
+  const refreshBtn = document.getElementById('refreshBtn');
 
-(async function init() {
-  const ok = await pingAuth();
-  if (ok) loadVideos();
-})();
+  if (!loginBtn || !logoutBtn) return;
+
+  if (me.loggedIn) {
+    loginBtn.classList.add('hidden');
+    logoutBtn.classList.remove('hidden');
+    if (refreshBtn) refreshBtn.disabled = false;
+  } else {
+    loginBtn.classList.remove('hidden');
+    logoutBtn.classList.add('hidden');
+    if (refreshBtn) refreshBtn.disabled = true;
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  updateAuthUI();
+
+  const loginBtn = document.getElementById('loginBtn');
+  const logoutBtn = document.getElementById('logoutBtn');
+  const refreshBtn = document.getElementById('refreshBtn');
+
+  if (loginBtn) loginBtn.addEventListener('click', () => {
+    window.location.href = '/auth/google';
+  });
+
+  if (logoutBtn) logoutBtn.addEventListener('click', () => {
+    window.location.href = '/logout';
+  });
+
+  if (refreshBtn) refreshBtn.addEventListener('click', async () => {
+    const r = await fetch('/api/videos');
+    const data = await r.json();
+    if (r.ok) {
+      console.log('videos:', data);
+      alert(`Видео: ${data.items.length}`);
+    } else {
+      alert(`Ошибка: ${JSON.stringify(data)}`);
+    }
+  });
+});
