@@ -8,7 +8,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // -------- Base setup
-app.set("trust proxy", 1); // важно на Render/за прокси
+app.set("trust proxy", 1); // важно за прокси (Render) для корректных secure-кук
 app.disable("x-powered-by");
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -23,7 +23,7 @@ app.use(
     cookie: {
       httpOnly: true,
       sameSite: "lax",
-      secure: "auto",                   // https => secure, http (локально) => нет
+      secure: "auto",                   // https => secure; локально http — без secure
       maxAge: 1000 * 60 * 60 * 24 * 7,  // 7 дней
     },
   })
@@ -38,7 +38,8 @@ const oauth2Client = new google.auth.OAuth2(
   process.env.GOOGLE_CLIENT_SECRET,
   REDIRECT_URI
 );
-// Нужный скоуп только чтение из Google Photos
+
+// Только чтение из Google Photos
 const SCOPE = ["https://www.googleapis.com/auth/photoslibrary.readonly"];
 
 // -------- Helpers
@@ -47,7 +48,7 @@ function ensureAuthed(req, res, next) {
     oauth2Client.setCredentials(req.session.tokens);
     return next();
   }
-  // для API возвращаем 401 (чтобы fetch не падал редиректом)
+  // Для API лучше 401, чтобы fetch не падал редиректом
   if (req.path.startsWith("/videos") || req.path.startsWith("/stream/") || req.path.startsWith("/debug/")) {
     return res.status(401).json({ error: "not_authenticated" });
   }
@@ -55,9 +56,26 @@ function ensureAuthed(req, res, next) {
 }
 
 async function getAccessToken() {
-  // гарантированно актуальный access_token
   const { token } = await oauth2Client.getAccessToken();
   return token;
+}
+
+// Универсальный ретрай для сетевых/5xx
+async function callWithRetry(fn, attempts = 3) {
+  let lastErr;
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastErr = e;
+      const status = e?.response?.status;
+      const retriable = !status || (status >= 500 && status < 600);
+      console.warn(`[RETRY] attempt ${i} failed`, status || e.message);
+      if (!retriable || i === attempts) throw e;
+      await new Promise((r) => setTimeout(r, 400 * i)); // backoff
+    }
+  }
+  throw lastErr;
 }
 
 // -------- OAuth routes
@@ -89,52 +107,64 @@ app.get("/logout", (req, res) => {
 });
 
 // -------- API: list videos (REST)
-app.post("/videos", ensureAuthed, async (req, res) => {
-  // Разрешим POST/GET; фронт использует GET, но POST удобен, если захотите фильтры.
-  return getVideosHandler(req, res);
-});
 app.get("/videos", ensureAuthed, async (req, res) => {
-  return getVideosHandler(req, res);
-});
-
-async function getVideosHandler(req, res) {
   try {
     console.log("[VIDEOS] authed sid:", req.sessionID, "hasTokens:", !!req.session?.tokens);
     const accessToken = await getAccessToken();
 
-    // Docs: https://developers.google.com/photos/library/reference/rest/v1/mediaItems/search
-    const r = await axios.post(
-      "https://photoslibrary.googleapis.com/v1/mediaItems:search",
-      {
-        pageSize: 50,
-        filters: { mediaTypeFilter: { mediaTypes: ["VIDEO"] } },
-      },
-      {
-        headers: { Authorization: `Bearer ${accessToken}` },
-        validateStatus: () => true,
-      }
-    );
+    // 1) Основной путь: POST /mediaItems:search c фильтром VIDEO
+    const searchResp = await callWithRetry(() =>
+      axios.post(
+        "https://photoslibrary.googleapis.com/v1/mediaItems:search",
+        { pageSize: 50, filters: { mediaTypeFilter: { mediaTypes: ["VIDEO"] } } },
+        { headers: { Authorization: `Bearer ${accessToken}` } }
+      )
+    ).catch((e) => e?.response || Promise.reject(e));
 
-    if (r.status !== 200) {
-      console.error("[VIDEOS] google error:", r.status, r.data);
-      return res.status(500).json({ error: "Failed to list videos" });
+    if (searchResp && searchResp.status === 200 && Array.isArray(searchResp.data?.mediaItems)) {
+      const items = searchResp.data.mediaItems.map((mi) => ({
+        id: mi.id,
+        filename: mi.filename,
+        mimeType: mi.mimeType,
+        productUrl: mi.productUrl,
+        baseUrl: mi.baseUrl,
+        creationTime: mi.mediaMetadata?.creationTime,
+      }));
+      return res.json({ items });
     }
 
-    const items = (r.data.mediaItems || []).map((mi) => ({
-      id: mi.id,
-      filename: mi.filename,
-      mimeType: mi.mimeType,
-      productUrl: mi.productUrl,
-      baseUrl: mi.baseUrl,
-      creationTime: mi.mediaMetadata?.creationTime,
-    }));
+    // 2) Фолбэк: GET /mediaItems (без фильтра) + фильтруем видео на сервере
+    console.warn("[VIDEOS] fallback to GET /mediaItems due to status:", searchResp?.status);
+    const listResp = await callWithRetry(() =>
+      axios.get("https://photoslibrary.googleapis.com/v1/mediaItems?pageSize=100", {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      })
+    ).catch((e) => e?.response || Promise.reject(e));
 
-    res.json({ items });
+    if (listResp && listResp.status === 200 && Array.isArray(listResp.data?.mediaItems)) {
+      const items = listResp.data.mediaItems
+        .filter((mi) => (mi.mimeType || "").toLowerCase().startsWith("video/"))
+        .map((mi) => ({
+          id: mi.id,
+          filename: mi.filename,
+          mimeType: mi.mimeType,
+          productUrl: mi.productUrl,
+          baseUrl: mi.baseUrl,
+          creationTime: mi.mediaMetadata?.creationTime,
+        }));
+      return res.json({ items });
+    }
+
+    console.error("[VIDEOS] google error (both paths):", searchResp?.status, listResp?.status);
+    return res.status(502).json({ error: "upstream_error" });
   } catch (e) {
-    console.error("[VIDEOS] error", e?.response?.data || e);
-    res.status(500).json({ error: "Failed to list videos" });
+    const status = e?.response?.status;
+    const data = e?.response?.data;
+    console.error("[VIDEOS] error", status, data || e.message || e);
+    if (status && status !== 200) return res.status(502).json({ error: "upstream_error", status });
+    return res.status(500).json({ error: "Failed to list videos" });
   }
-}
+});
 
 // -------- API: proxy stream (REST + Range)
 app.get("/stream/:id", ensureAuthed, async (req, res) => {
@@ -142,11 +172,12 @@ app.get("/stream/:id", ensureAuthed, async (req, res) => {
   try {
     const accessToken = await getAccessToken();
 
-    // Docs: https://developers.google.com/photos/library/reference/rest/v1/mediaItems/get
-    const info = await axios.get(`https://photoslibrary.googleapis.com/v1/mediaItems/${encodeURIComponent(id)}`, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-      validateStatus: () => true,
-    });
+    // Получим meta, чтобы взять baseUrl
+    const info = await callWithRetry(() =>
+      axios.get(`https://photoslibrary.googleapis.com/v1/mediaItems/${encodeURIComponent(id)}`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      })
+    ).catch((e) => e?.response || Promise.reject(e));
 
     if (info.status !== 200 || !info.data?.baseUrl) {
       console.error("[STREAM] get mediaItem error:", info.status, info.data);
@@ -161,14 +192,16 @@ app.get("/stream/:id", ensureAuthed, async (req, res) => {
       Connection: "keep-alive",
     };
 
-    const upstream = await axios({
-      url,
-      method: "GET",
-      headers,
-      responseType: "stream",
-      maxRedirects: 5,
-      validateStatus: () => true,
-    });
+    const upstream = await callWithRetry(() =>
+      axios({
+        url,
+        method: "GET",
+        headers,
+        responseType: "stream",
+        maxRedirects: 5,
+        validateStatus: () => true,
+      })
+    );
 
     res.status(upstream.status);
     const h = upstream.headers;
@@ -191,7 +224,7 @@ app.get("/stream/:id", ensureAuthed, async (req, res) => {
   }
 });
 
-// -------- (опционально) Диагностика токена
+// -------- (optional) token debug
 app.get("/debug/token", ensureAuthed, async (req, res) => {
   try {
     const info = await oauth2Client.getTokenInfo(oauth2Client.credentials.access_token);
