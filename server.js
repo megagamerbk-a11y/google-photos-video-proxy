@@ -7,13 +7,13 @@ import { google } from "googleapis";
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// -------- Base setup
+/* -------------------- Base -------------------- */
 app.set("trust proxy", 1); // важно за прокси (Render) для корректных secure-кук
 app.disable("x-powered-by");
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// -------- Sessions
+/* -------------------- Sessions -------------------- */
 app.use(
   session({
     name: "sid",
@@ -23,13 +23,13 @@ app.use(
     cookie: {
       httpOnly: true,
       sameSite: "lax",
-      secure: "auto",                   // https => secure; локально http — без secure
-      maxAge: 1000 * 60 * 60 * 24 * 7,  // 7 дней
+      secure: "auto",                  // https => secure; локально http — без secure
+      maxAge: 1000 * 60 * 60 * 24 * 7, // 7 дней
     },
   })
 );
 
-// -------- OAuth setup
+/* -------------------- OAuth -------------------- */
 const BASE_URL = (process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`).replace(/\/$/, "");
 const REDIRECT_URI = `${BASE_URL}/oauth2/callback`;
 
@@ -42,13 +42,12 @@ const oauth2Client = new google.auth.OAuth2(
 // Только чтение из Google Photos
 const SCOPE = ["https://www.googleapis.com/auth/photoslibrary.readonly"];
 
-// -------- Helpers
+/* -------------------- Helpers -------------------- */
 function ensureAuthed(req, res, next) {
   if (req.session?.tokens) {
     oauth2Client.setCredentials(req.session.tokens);
     return next();
   }
-  // Для API лучше 401, чтобы fetch не падал редиректом
   if (req.path.startsWith("/videos") || req.path.startsWith("/stream/") || req.path.startsWith("/debug/")) {
     return res.status(401).json({ error: "not_authenticated" });
   }
@@ -78,7 +77,7 @@ async function callWithRetry(fn, attempts = 3) {
   throw lastErr;
 }
 
-// -------- OAuth routes
+/* -------------------- OAuth routes -------------------- */
 app.get("/auth/google", (req, res) => {
   const url = oauth2Client.generateAuthUrl({
     access_type: "offline",
@@ -106,7 +105,7 @@ app.get("/logout", (req, res) => {
   req.session.destroy(() => res.redirect("/"));
 });
 
-// -------- API: list videos (REST)
+/* -------------------- API: list videos -------------------- */
 app.get("/videos", ensureAuthed, async (req, res) => {
   try {
     console.log("[VIDEOS] authed sid:", req.sessionID, "hasTokens:", !!req.session?.tokens);
@@ -155,8 +154,14 @@ app.get("/videos", ensureAuthed, async (req, res) => {
       return res.json({ items });
     }
 
-    console.error("[VIDEOS] google error (both paths):", searchResp?.status, listResp?.status);
-    return res.status(502).json({ error: "upstream_error" });
+    console.error("[VIDEOS] google error (both paths):", searchResp?.status, searchResp?.data, listResp?.status, listResp?.data);
+    return res.status(502).json({
+      error: "upstream_error",
+      searchStatus: searchResp?.status,
+      searchData: searchResp?.data,
+      listStatus: listResp?.status,
+      listData: listResp?.data,
+    });
   } catch (e) {
     const status = e?.response?.status;
     const data = e?.response?.data;
@@ -166,13 +171,13 @@ app.get("/videos", ensureAuthed, async (req, res) => {
   }
 });
 
-// -------- API: proxy stream (REST + Range)
+/* -------------------- API: proxy stream (Range) -------------------- */
 app.get("/stream/:id", ensureAuthed, async (req, res) => {
   const id = req.params.id;
   try {
     const accessToken = await getAccessToken();
 
-    // Получим meta, чтобы взять baseUrl
+    // meta → baseUrl
     const info = await callWithRetry(() =>
       axios.get(`https://photoslibrary.googleapis.com/v1/mediaItems/${encodeURIComponent(id)}`, {
         headers: { Authorization: `Bearer ${accessToken}` },
@@ -224,7 +229,7 @@ app.get("/stream/:id", ensureAuthed, async (req, res) => {
   }
 });
 
-// -------- (optional) token debug
+/* -------------------- DEBUG endpoints -------------------- */
 app.get("/debug/token", ensureAuthed, async (req, res) => {
   try {
     const info = await oauth2Client.getTokenInfo(oauth2Client.credentials.access_token);
@@ -234,7 +239,31 @@ app.get("/debug/token", ensureAuthed, async (req, res) => {
   }
 });
 
-// -------- Login gate before static
+app.get("/debug/videos", ensureAuthed, async (req, res) => {
+  try {
+    const { token } = await oauth2Client.getAccessToken();
+
+    const searchResp = await axios.post(
+      "https://photoslibrary.googleapis.com/v1/mediaItems:search",
+      { pageSize: 50, filters: { mediaTypeFilter: { mediaTypes: ["VIDEO"] } } },
+      { headers: { Authorization: `Bearer ${token}` }, validateStatus: () => true }
+    );
+
+    const listResp = await axios.get(
+      "https://photoslibrary.googleapis.com/v1/mediaItems?pageSize=100",
+      { headers: { Authorization: `Bearer ${token}` }, validateStatus: () => true }
+    );
+
+    res.json({
+      search: { status: searchResp.status, data: searchResp.data },
+      list:   { status: listResp.status,   data: listResp.data   }
+    });
+  } catch (e) {
+    res.status(500).json({ error: e?.response?.data || String(e) });
+  }
+});
+
+/* -------------------- Login gate + static -------------------- */
 app.get("/", (req, res, next) => {
   if (!req.session?.tokens) {
     return res.send(`
@@ -257,7 +286,6 @@ app.get("/", (req, res, next) => {
   next();
 });
 
-// -------- Static UI (после авторизации)
 app.use(express.static("public"));
 
 app.listen(PORT, () => {
