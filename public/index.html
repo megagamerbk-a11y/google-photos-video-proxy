@@ -2,98 +2,50 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Google Photos Player</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
-    :root {
-      --bg:#fff; --text:#111; --muted:#666; --line:#e6e6e6;
-      --btn:#f6f6f6; --btn-border:#d0d0d0; --btn-hover:#eee;
-      --accent:#0b57d0;
-    }
-    * { box-sizing:border-box; }
-    body {
-      margin:0; padding:0 20px 40px;
-      background:var(--bg); color:var(--text);
-      font:16px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-    }
-    header {
-      display:flex; gap:12px; justify-content:flex-end; align-items:center;
-      padding:16px 0; border-bottom:1px solid var(--line); margin-bottom:16px;
-    }
-    h1 { margin:10px 0 8px; font-size:28px; }
-    p.lead { margin:0 0 18px; color:var(--muted); }
-
-    button {
-      padding:8px 14px; border-radius:10px; border:1px solid var(--btn-border);
-      background:var(--btn); cursor:pointer; transition:background .15s ease;
-    }
-    button:hover { background:var(--btn-hover); }
-    button.primary {
-      color:#fff; background:var(--accent); border-color:var(--accent);
-    }
-    button.primary:hover { filter:brightness(0.95); }
-    button:disabled { opacity:.55; cursor:not-allowed; }
-
-    .hidden { display:none !important; }
-
-    .layout {
-      display:grid; grid-template-columns: 320px 1fr; gap:20px;
-    }
-    @media (max-width: 960px) { .layout { grid-template-columns: 1fr; } }
-
-    .list {
-      border:1px solid var(--line); border-radius:12px; overflow:hidden;
-      min-height:200px;
-    }
-    .list > .title {
-      padding:12px 14px; border-bottom:1px solid var(--line); font-weight:600;
-      background:#fafafa;
-    }
-    .items { list-style:none; margin:0; padding:0; max-height:60vh; overflow:auto; }
-    .items li {
-      padding:10px 14px; border-bottom:1px solid var(--line); cursor:pointer;
-    }
-    .items li:hover { background:#fafafa; }
-    .empty { padding:16px; color:var(--muted); }
-
-    .player {
-      border:1px solid var(--line); border-radius:12px; padding:12px;
-    }
-    video { width:100%; max-height:65vh; background:#000; border-radius:8px; }
-
-    .toolbar { display:flex; gap:10px; margin-bottom:10px; }
-    .note { color:var(--muted); font-size:14px; }
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; background: #111; color: #eee; }
+    header { display: flex; justify-content: space-between; align-items: center; padding: 16px; background: #1a1a1a; border-bottom: 1px solid #222; }
+    .btn { background: #4f46e5; border: 0; color: white; padding: 10px 14px; border-radius: 8px; cursor: pointer; }
+    .btn.secondary { background: #2d2d2d; }
+    main { padding: 16px; }
+    h1 { margin: 0 0 8px; font-size: 24px; }
+    #player { width: 100%; max-width: 1200px; height: 360px; background: #000; border-radius: 10px; margin: 12px 0 24px; }
+    #list { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; max-width: 1200px; }
+    .card { background: #1a1a1a; border: 1px solid #252525; border-radius: 10px; padding: 12px; cursor: pointer; }
+    .card:hover { border-color: #4f46e5; }
+    .row { display: flex; gap: 8px; align-items: center; }
+    .mono { color: #aaa; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+    .muted { color: #aaa; }
   </style>
 </head>
 <body>
-  <header>
-    <button id="loginBtn" class="primary">Войти</button>
-    <button id="logoutBtn" class="hidden">Выйти</button>
-    <button id="refreshBtn" disabled>Обновить список</button>
-  </header>
-
-  <h1>Ваши видео из Google Photos</h1>
-  <p class="lead">Выберите видео слева, чтобы начать воспроизведение.</p>
-
-  <div class="layout">
-    <!-- Список видео -->
-    <section class="list">
-      <div class="title">Список</div>
-      <ul id="list" class="items">
-        <li class="empty">Видео не загружены. Нажмите «Обновить список».</li>
-      </ul>
-    </section>
-
-    <!-- Проигрыватель -->
-    <section class="player">
-      <div class="toolbar">
-        <span id="currentTitle" class="note">Ничего не выбрано</span>
-      </div>
-      <video id="video" controls preload="metadata" playsinline></video>
-    </section>
+<header>
+  <div>
+    <div class="muted">Google Photos Player</div>
+    <strong id="hello"></strong>
   </div>
+  <div class="row">
+    <button class="btn secondary" id="refresh">Обновить список</button>
+    <button class="btn" id="authBtn">Войти</button>
+  </div>
+</header>
 
-  <!-- Подключение логики -->
-  <script src="/main.js" defer></script>
+<main>
+  <h1>Ваши видео из Google Photos</h1>
+  <p class="muted">Выберите видео ниже, чтобы начать воспроизведение.</p>
+
+  <video id="player" controls preload="metadata">
+    <source src="" type="video/mp4" />
+    Ваш браузер не поддерживает видео.
+  </video>
+
+  <h2>Список</h2>
+  <div id="list"></div>
+  <p id="empty" class="muted" style="display:none">Видео не найдены. Нажмите «Обновить список» или проверьте, что в Google Photos есть видео.</p>
+</main>
+
+<script src="/main.js" defer></script>
 </body>
 </html>
