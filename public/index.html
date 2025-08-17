@@ -1,51 +1,123 @@
 <!doctype html>
 <html lang="ru">
-<head>
-  <meta charset="utf-8" />
-  <title>Google Photos Player</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; background: #111; color: #eee; }
-    header { display: flex; justify-content: space-between; align-items: center; padding: 16px; background: #1a1a1a; border-bottom: 1px solid #222; }
-    .btn { background: #4f46e5; border: 0; color: white; padding: 10px 14px; border-radius: 8px; cursor: pointer; }
-    .btn.secondary { background: #2d2d2d; }
-    main { padding: 16px; }
-    h1 { margin: 0 0 8px; font-size: 24px; }
-    #player { width: 100%; max-width: 1200px; height: 360px; background: #000; border-radius: 10px; margin: 12px 0 24px; }
-    #list { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; max-width: 1200px; }
-    .card { background: #1a1a1a; border: 1px solid #252525; border-radius: 10px; padding: 12px; cursor: pointer; }
-    .card:hover { border-color: #4f46e5; }
-    .row { display: flex; gap: 8px; align-items: center; }
-    .mono { color: #aaa; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
-    .muted { color: #aaa; }
-  </style>
-</head>
-<body>
-<header>
-  <div>
-    <div class="muted">Google Photos Player</div>
-    <strong id="hello"></strong>
-  </div>
-  <div class="row">
-    <button class="btn secondary" id="refresh">Обновить список</button>
-    <button class="btn" id="authBtn">Войти</button>
-  </div>
-</header>
+  <head>
+    <meta charset="utf-8" />
+    <title>Google Photos Player</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <style>
+      :root {
+        --bg: #0f1115;
+        --fg: #e6e6e6;
+        --muted: #9aa0a6;
+        --btn: #1f6feb;
+        --btn-fg: #fff;
+        --card: #161a22;
+        --border: #2b3240;
+      }
+      html, body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      }
+      header {
+        padding: 16px 20px;
+        font-weight: 700;
+      }
+      .toolbar {
+        display: flex;
+        gap: 12px;
+        padding: 0 20px 16px 20px;
+      }
+      button {
+        background: var(--card);
+        color: var(--fg);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 10px 14px;
+        cursor: pointer;
+        transition: 0.2s ease;
+      }
+      button.primary {
+        background: var(--btn);
+        color: var(--btn-fg);
+        border-color: transparent;
+      }
+      button:disabled {
+        opacity: 0.6;
+        cursor: default;
+      }
+      .player {
+        background: #000;
+        border-top: 1px solid var(--border);
+        border-bottom: 1px solid var(--border);
+        padding: 12px 0;
+      }
+      .wrap {
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: 0 20px;
+      }
+      video {
+        width: 100%;
+        max-height: 60vh;
+        background: #000;
+        border-radius: 10px;
+        outline: none;
+      }
+      h2 {
+        margin: 20px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+        gap: 12px;
+        padding: 0 20px 40px 20px;
+      }
+      .item {
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: var(--card);
+        padding: 12px;
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        cursor: pointer;
+      }
+      .item:hover { border-color: #3a455a; }
+      .name {
+        color: var(--fg);
+        font-size: 14px;
+        line-height: 1.3;
+      }
+      .muted { color: var(--muted); font-size: 12px; }
+      .empty {
+        color: var(--muted);
+        padding: 0 20px 40px 20px;
+      }
+    </style>
+  </head>
+  <body>
+    <header class="wrap">Google Photos Player</header>
 
-<main>
-  <h1>Ваши видео из Google Photos</h1>
-  <p class="muted">Выберите видео ниже, чтобы начать воспроизведение.</p>
+    <div class="toolbar">
+      <button id="loginBtn" class="primary">Войти с Google</button>
+      <button id="logoutBtn">Выйти</button>
+      <button id="refreshBtn">Обновить список</button>
+    </div>
 
-  <video id="player" controls preload="metadata">
-    <source src="" type="video/mp4" />
-    Ваш браузер не поддерживает видео.
-  </video>
+    <div class="player">
+      <div class="wrap">
+        <video id="video" controls preload="metadata"></video>
+      </div>
+    </div>
 
-  <h2>Список</h2>
-  <div id="list"></div>
-  <p id="empty" class="muted" style="display:none">Видео не найдены. Нажмите «Обновить список» или проверьте, что в Google Photos есть видео.</p>
-</main>
+    <h2>Список</h2>
+    <div id="list" class="grid"></div>
+    <div id="empty" class="empty" style="display:none;">
+      Видео не найдены. Нажмите «Обновить список» или убедитесь, что в Google Photos есть видео.
+    </div>
 
-<script src="/main.js" defer></script>
-</body>
+    <script src="main.js" defer></script>
+  </body>
 </html>
